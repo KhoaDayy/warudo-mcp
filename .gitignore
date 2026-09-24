@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+package-lock.json.bak
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# Logs & Unity output
+*.log
+Player.log
+output_log.txt
+*.tmp
+*.bak
+patch-encoding-test*.txt
+
+# Local / development scratch test scripts
+test_anim.mjs
+mcp-server/*.js
+!mcp-server/src/**
+mcp-server/*.mjs
+
+# Sample / test blueprints
+simple_prop_throw.json
+yt_blueprint*.json
+
+# Reference folder (official Warudo examples used during dev)
+reference/
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
