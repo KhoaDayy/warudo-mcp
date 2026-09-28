@@ -6,6 +6,7 @@ package-lock.json.bak
 dist/
 build/
 *.tsbuildinfo
+*.warudo
 
 # Logs & Unity output
 *.log

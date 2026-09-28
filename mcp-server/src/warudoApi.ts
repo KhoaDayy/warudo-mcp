@@ -1,19 +1,6 @@
 import WebSocket from "ws";
-
-/**
- * Client kết nối tới control-plane tích hợp sẵn của Warudo
- * (ws://localhost:19053/ — Warudo.Core.Server.Service).
- *
- * Giao thức (đã xác minh live):
- *   →  { "action": "<action>", "data": { "id": <số>, ...payload } }
- *   ←  { "action": "<action>", "error": null | "<chuỗi>", "data": <payload> }
- *
- * Lưu ý quan trọng:
- *  - Server KHÔNG echo "id" trong phản hồi → đối chiếu theo action.
- *  - Server chủ động đẩy "frameUpdate" liên tục (trạng thái entity hiện tại, 30-60 FPS),
- *    và "confirmation" / "structuredDataInput" khi cần xác nhận.
- *  - Bắt tay cần subprotocol bằng API token (mỗi lần khởi động Warudo đổi token).
- */
+import { validateWsUrl } from "./config.js";
+import { validateApiToken } from "./token.js";
 
 export interface ApiMessage {
   action: string;
@@ -21,39 +8,67 @@ export interface ApiMessage {
   data?: unknown;
 }
 
+export class TransportError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly execution: "UNKNOWN" | "NOT_EXECUTED" = "UNKNOWN"
+  ) {
+    super(message);
+    this.name = "TransportError";
+  }
+}
+
+export interface TransportOptions {
+  callTimeoutMs?: number;
+  reconnectDelayMs?: number;
+  frameThrottleMs?: number;
+}
+
 type Listener = (action: string, data: unknown) => void;
+type PendingCall = {
+  action: string;
+  expectedAction: string;
+  wire: string;
+  resolve: (message: ApiMessage) => void;
+  reject: (error: Error) => void;
+  timeout?: ReturnType<typeof setTimeout>;
+};
 
-const CALL_TIMEOUT_MS = 20_000;
-const INITIAL_RETRY_DELAY_MS = 2_000;
-const MAX_RETRY_DELAY_MS = 15_000;
-const FRAME_UPDATE_THROTTLE_MS = 1_000; // Tối đa 1 frame/giây để chống bão CPU & memory churn
+const MAX_REQUEST_BYTES = 1024 * 1024;
+const MAX_QUEUED_CALLS = 128;
 
+/** Native Warudo wire protocol. No echoed request IDs: at most one call is sent at a time. */
 export class WarudoApiClient {
   private ws: WebSocket | null = null;
   private connected = false;
   private isConnecting = false;
   private nextId = 1;
-  private pending = new Map<
-    string,
-    { resolve: (m: ApiMessage) => void; reject: (e: Error) => void; timeout: ReturnType<typeof setTimeout> }
-  >();
+  private active: PendingCall | null = null;
+  private queue: PendingCall[] = [];
   private listeners = new Set<Listener>();
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
-  private currentRetryDelay = INITIAL_RETRY_DELAY_MS;
+  private currentRetryDelay: number;
   private stopped = false;
   private lastFrame: unknown = null;
   private lastFrameUpdateMs = 0;
-  private lastLog = "";
-
-  /** Cách phản hồi khi Warudo hỏi xác nhận. Mặc định decline (an toàn). */
-  private confirmationPolicy: "decline" | "accept" = "decline";
-  private recentAutoReplies: Array<{ ts: string; action: string; reply: string }> = [];
+  private generation = 0;
+  private readonly callTimeoutMs: number;
+  private readonly initialRetryDelay: number;
+  private readonly frameThrottleMs: number;
+  private dialogHistory: Array<{ ts: string; action: string; reply: string }> = [];
 
   constructor(
     private url: string,
-    /** Hàm lấy token API (async — mỗi lần kết nối lại sẽ gọi lại để bắt token mới sau khi Warudo khởi động lại). */
-    private getToken: () => Promise<string | null>
-  ) {}
+    private getToken: () => Promise<string | null>,
+    options: TransportOptions = {}
+  ) {
+    this.url = validateWsUrl(url);
+    this.callTimeoutMs = options.callTimeoutMs ?? 20_000;
+    this.initialRetryDelay = options.reconnectDelayMs ?? 2_000;
+    this.currentRetryDelay = this.initialRetryDelay;
+    this.frameThrottleMs = options.frameThrottleMs ?? 1_000;
+  }
 
   connect(): void {
     this.stopped = false;
@@ -62,268 +77,194 @@ export class WarudoApiClient {
 
   stop(): void {
     this.stopped = true;
-    this.isConnecting = false;
-    if (this.retryTimer) {
-      clearTimeout(this.retryTimer);
-      this.retryTimer = null;
-    }
-    this.ws?.close();
-    this.ws = null;
-    this.connected = false;
-    this.failAll(new Error("WarudoApiClient stopped."));
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.retire("STOPPED", "Warudo API client stopped.");
   }
 
-  isConnected(): boolean {
-    return this.connected;
-  }
-
-  /** Snapshot mới nhất từ thông báo "frameUpdate" (giá trị port hiện tại của các entity). */
-  getLastFrame(): unknown {
-    return this.lastFrame;
-  }
-
-  /**
-   * Đổi cách phản hồi confirmation/structuredDataInput của Warudo:
-   *  - "decline": tự từ chối/hủy (mặc định) — an toàn, nhưng lệnh phá hoại có thể no-op.
-   *  - "accept":  tự đồng ý — dùng khi bạn thực sự muốn chạy thao tác phá hoại.
-   */
-  setConfirmationPolicy(mode: "decline" | "accept"): void {
-    this.confirmationPolicy = mode;
-    console.error(`[WarudoApi] Confirmation policy → ${mode}`);
-  }
-
-  getConfirmationPolicy(): "decline" | "accept" {
-    return this.confirmationPolicy;
-  }
-
-  /** Các lần auto-reply gần đây (để Claude biết lệnh nào bị từ chối/đồng ý). */
+  isConnected(): boolean { return this.connected; }
+  getLastFrame(): unknown { return this.lastFrame; }
+  getConfirmationPolicy(): "manual" { return "manual"; }
+  /** Compatibility accessor: manual dialogs are recorded, never automatically accepted. */
   getRecentAutoReplies(): Array<{ ts: string; action: string; reply: string }> {
-    return this.recentAutoReplies;
+    return this.dialogHistory.map((item) => ({ ...item }));
   }
-
-  /** Đăng ký nhận thông báo/broadcast từ Warudo. Trả về hàm hủy đăng ký. */
   onNotification(cb: Listener): () => void {
     this.listeners.add(cb);
     return () => this.listeners.delete(cb);
   }
 
-  /**
-   * Gọi một action bất kỳ của control-plane. Payload đi kèm data (KHÔNG gồm "id" —
-   * client tự gắn id để đối chiếu).
-   */
   call(action: string, data: Record<string, unknown> = {}): Promise<ApiMessage> {
-    if (
-      action === "exportGraph" &&
-      (typeof data.graph !== "string" || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(data.graph))
-    ) {
-      throw new Error("exportGraph requires a valid graph UUID.");
+    if (typeof action !== "string" || !action || !data || typeof data !== "object" || Array.isArray(data)) {
+      return Promise.reject(new TransportError("INVALID_INPUT", "Action and object payload are required.", "NOT_EXECUTED"));
     }
-    if (!this.connected || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error(
-        `Chưa kết nối tới control-plane Warudo (${this.url}). Kiểm tra Warudo đang chạy và token API đã lấy được.`
-      );
+    if (action === "exportGraph" && (typeof data.graph !== "string" || !isUuid(data.graph))) {
+      return Promise.reject(new TransportError("INVALID_INPUT", "exportGraph requires a valid graph UUID.", "NOT_EXECUTED"));
     }
-    const id = this.nextId++;
-    const responseAction =
-      action === "exportGraph" || action === "exportAsset"
-        ? `${action}:${String(action === "exportGraph" ? data.graph : data.asset).toLowerCase()}`
-        : action;
-    const key = `${responseAction}:${id}`;
-
-    return new Promise<ApiMessage>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pending.delete(key);
-        reject(new Error(`Hết thời gian chờ cho action "${action}".`));
-      }, CALL_TIMEOUT_MS);
-
-      this.pending.set(key, {
-        resolve: (m) => {
-          clearTimeout(timeout);
-          resolve(m);
-        },
-        reject: (e) => {
-          clearTimeout(timeout);
-          reject(e);
-        },
-        timeout,
-      });
-
-      // Server đọc data["id"] nên id phải nằm trong data (khớp pattern đã xác minh).
-      this.ws!.send(JSON.stringify({ action, data: { id, ...data } }), (err) => {
-        if (err) {
-          this.pending.delete(key);
-          clearTimeout(timeout);
-          reject(err);
-        }
-      });
+    if (!this.connected || this.ws?.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new TransportError("NOT_CONNECTED", "Warudo control-plane is not connected.", "NOT_EXECUTED"));
+    }
+    if (this.queue.length >= MAX_QUEUED_CALLS) {
+      return Promise.reject(new TransportError("BUSY", "Warudo request queue is full.", "NOT_EXECUTED"));
+    }
+    let wire: string;
+    try {
+      // Preserve the native data.id meaning (entity ID for entity actions).
+      wire = JSON.stringify({ action, data: { id: this.nextId++, ...data } });
+      if (Buffer.byteLength(wire) > MAX_REQUEST_BYTES) throw new Error();
+    } catch {
+      return Promise.reject(new TransportError("INVALID_INPUT", "Request must be JSON and at most 1 MiB.", "NOT_EXECUTED"));
+    }
+    const target = action === "exportGraph" ? data.graph : data.asset;
+    const expectedAction = (action === "exportGraph" || action === "exportAsset") && typeof target === "string"
+      ? `${action}:${target.toLowerCase()}` : action;
+    return new Promise((resolve, reject) => {
+      this.queue.push({ action, expectedAction, wire, resolve, reject });
+      this.pump();
     });
   }
 
   private async open(): Promise<void> {
     if (this.stopped || this.connected || this.isConnecting) return;
     this.isConnecting = true;
-
+    const generation = ++this.generation;
     try {
-      const token = await this.getToken();
-      if (!token) {
-        this.logOnce("[WarudoApi] Chưa có API token (Warudo chưa chạy?) — thử lại sau.");
+      const discovered = await this.getToken();
+      if (this.stopped || generation !== this.generation) return;
+      if (!discovered) {
         this.isConnecting = false;
         this.scheduleRetry();
         return;
       }
-
-      if (this.stopped) {
-        this.isConnecting = false;
-        return;
-      }
-
-      const ws = new WebSocket(this.url, [token]);
+      const token = validateApiToken(discovered);
+      const ws = new WebSocket(this.url, [token], { handshakeTimeout: this.callTimeoutMs, maxPayload: 16 * 1024 * 1024 });
       this.ws = ws;
-
       ws.on("open", () => {
+        if (generation !== this.generation) return;
         this.connected = true;
         this.isConnecting = false;
-        this.currentRetryDelay = INITIAL_RETRY_DELAY_MS; // reset retry delay khi kết nối thành công
+        this.currentRetryDelay = this.initialRetryDelay;
         try {
-          ws.send(JSON.stringify({ action: "onConnected" }));
-        } catch {}
-        console.error(`[WarudoApi] Đã kết nối control-plane ${this.url}`);
+          ws.send(JSON.stringify({ action: "onConnected" }), (error) => {
+            if (error && generation === this.generation) this.retire("SEND_FAILED", "Warudo initialization failed.");
+          });
+        } catch {
+          this.retire("SEND_FAILED", "Warudo initialization failed.");
+        }
       });
-
       ws.on("message", (raw) => {
-        // Tối ưu hóa hiệu năng: Warudo gửi frameUpdate ở 30-60 FPS với payload rất lớn.
-        // Tránh decode toàn bộ buffer thành chuỗi nếu đây là frameUpdate bị throttle.
-        if (Buffer.isBuffer(raw)) {
-          const head = raw.subarray(0, 100).toString("utf-8");
-          if (head.includes('"frameUpdate"')) {
-            const now = Date.now();
-            if (now - this.lastFrameUpdateMs < FRAME_UPDATE_THROTTLE_MS) {
-              return;
-            }
-            this.lastFrameUpdateMs = now;
-          }
-        }
-
-        const rawStr = typeof raw === "string" ? raw : raw.toString();
-        if (!Buffer.isBuffer(raw)) {
-          if (rawStr.includes('"action":"frameUpdate"') || rawStr.includes('"action": "frameUpdate"')) {
-            const now = Date.now();
-            if (now - this.lastFrameUpdateMs < FRAME_UPDATE_THROTTLE_MS) {
-              return;
-            }
-            this.lastFrameUpdateMs = now;
-          }
-        }
-
-        let msg: unknown;
-        try {
-          msg = JSON.parse(rawStr);
-        } catch {
-          return;
-        }
-        this.handleMessage(msg as Record<string, unknown>);
+        if (generation !== this.generation) return;
+        if (this.shouldDropThrottledFrame(raw)) return;
+        let message: unknown;
+        try { message = JSON.parse(raw.toString()); } catch { return; }
+        if (!message || typeof message !== "object" || Array.isArray(message)) return;
+        this.handleMessage(message as Record<string, unknown>);
       });
-
       ws.on("unexpected-response", (_req, res) => {
-        this.logOnce(
-          `[WarudoApi] Bắt tay bị từ chối (HTTP ${res.statusCode}) — token API sai/hết hạn, thử lại.`
-        );
-        this.connected = false;
-        this.isConnecting = false;
-        try {
-          ws.terminate();
-        } catch {
-          /* bỏ qua */
-        }
-        this.scheduleRetry();
+        res.resume();
+        if (generation === this.generation) this.retire("AUTH_FAILED", "Warudo API handshake was rejected.");
       });
-
-      ws.on("error", (err) => {
-        this.isConnecting = false;
-        console.error(`[WarudoApi] Lỗi WebSocket: ${(err as Error).message}`);
+      // Never log raw websocket errors: they can contain connection credentials.
+      ws.on("error", () => {
+        if (generation === this.generation) this.retire("DISCONNECTED", "Warudo API connection failed.");
       });
-
       ws.on("close", () => {
-        this.connected = false;
-        this.isConnecting = false;
-        this.failAll(new Error("Mất kết nối control-plane Warudo."));
-        if (!this.stopped) this.scheduleRetry();
+        if (generation === this.generation) this.retire("DISCONNECTED", "Warudo API connection closed.");
       });
-    } catch (e) {
+    } catch {
+      if (generation !== this.generation) return;
       this.isConnecting = false;
       this.scheduleRetry();
     }
   }
 
-  private handleMessage(msg: Record<string, unknown>): void {
-    const action = typeof msg.action === "string" ? msg.action : "";
-    const d = msg.data;
-
-    // 1) Khớp theo id nếu payload có id.
-    if (d && typeof d === "object" && typeof (d as Record<string, unknown>).id === "number") {
-      const respId = (d as Record<string, unknown>).id;
-      // Khớp chính xác hoặc khớp prefix action:id
-      for (const [key, hit] of this.pending) {
-        if (key.endsWith(`:${respId}`)) {
-          this.pending.delete(key);
-          hit.resolve(msg as unknown as ApiMessage);
-          return;
-        }
-      }
-    }
-
-    // 2) Server không echo id → khớp theo action (xử lý cả exportGraph/exportAsset).
-    const matches = [...this.pending.keys()].filter((key) => {
-      const prefix = key.slice(0, key.lastIndexOf(":"));
-      return prefix === action || prefix.startsWith(action + ":");
-    });
-    if (matches.length > 0) {
-      const key = matches[0];
-      const hit = this.pending.get(key)!;
-      this.pending.delete(key);
-      hit.resolve(msg as unknown as ApiMessage);
+  private handleMessage(message: Record<string, unknown>): void {
+    const action = typeof message.action === "string" ? message.action : "";
+    if (!action) return;
+    if (action === "frameUpdate") {
+      if (Date.now() - this.lastFrameUpdateMs < this.frameThrottleMs) return;
+      this.lastFrameUpdateMs = Date.now();
+      this.lastFrame = message.data;
+      this.notify(action, message.data);
       return;
     }
-
-    // 3) Thông báo / broadcast.
-    if (action === "frameUpdate") {
-      this.lastFrame = d;
+    if (action === "confirmation" || action === "structuredDataInput") {
+      this.dialogHistory.push({ ts: new Date().toISOString(), action, reply: "manual: Warudo UI input required" });
+      if (this.dialogHistory.length > 10) this.dialogHistory.shift();
+      this.notify(action, message.data);
+      // Dialog IDs identify dialogs, not requests. Never auto-answer an unrelated UI dialog.
+      if (this.active) this.retire("CONFIRMATION_REQUIRED", "Warudo requires input in its UI; execution is not confirmed.");
+      return;
     }
-    if (action === "confirmation") {
-      const p = (d ?? {}) as Record<string, unknown>;
-      const confirm = this.confirmationPolicy === "accept";
-      this.reply("confirmation", { id: p.id, confirm });
-      this.recordAutoReply(action, confirm ? "confirm:true" : "confirm:false");
-    } else if (action === "structuredDataInput") {
-      const p = (d ?? {}) as Record<string, unknown>;
-      const cancel = this.confirmationPolicy !== "accept";
-      this.reply("structuredDataInput", { id: p.id, cancel });
-      this.recordAutoReply(action, cancel ? "cancel:true" : "cancel:false");
-    }
-    for (const l of this.listeners) {
-      try {
-        l(action, d);
-      } catch (err) {
-        console.error(`[WarudoApi] Lỗi listener: ${(err as Error).message}`);
+    const active = this.active;
+    const baseExportError = active && (active.action === "exportGraph" || active.action === "exportAsset") && action === active.action && typeof message.error === "string" && message.error.length > 0;
+    const matches = active && (action === active.expectedAction || baseExportError);
+    if (matches && message.isResponse !== false && ("data" in message || "error" in message)) {
+      if (message.error !== undefined && message.error !== null && typeof message.error !== "string") {
+        this.retire("PROTOCOL_ERROR", "Warudo returned a malformed response.");
+        return;
       }
+      this.active = null;
+      clearTimeout(active.timeout);
+      active.resolve({ action, data: message.data, error: message.error as string | null | undefined });
+      this.pump();
+      return;
+    }
+    this.notify(action, message.data);
+  }
+
+  private shouldDropThrottledFrame(raw: WebSocket.RawData): boolean {
+    if (this.frameThrottleMs <= 0 || Date.now() - this.lastFrameUpdateMs >= this.frameThrottleMs) return false;
+    if (!Buffer.isBuffer(raw)) return false;
+    // Warudo puts action near the beginning of JSON frameUpdate messages.
+    // Inspect a bounded prefix so a 30–60 FPS payload is not fully decoded when throttled.
+    return /^\s*\{\s*"action"\s*:\s*"frameUpdate"\s*[,}]/.test(raw.subarray(0, 256).toString("utf8"));
+  }
+
+  private notify(action: string, data: unknown): void {
+    for (const listener of this.listeners) {
+      try { listener(action, data); } catch { console.error("[WarudoApi] Notification listener failed."); }
     }
   }
 
-  private recordAutoReply(action: string, reply: string): void {
-    this.recentAutoReplies.push({ ts: new Date().toISOString(), action, reply });
-    if (this.recentAutoReplies.length > 10) this.recentAutoReplies.shift();
-    console.error(
-      `[WarudoApi] Auto-reply "${action}" → ${reply} (policy: ${this.confirmationPolicy}). ` +
-        `Đổi bằng warudo_set_confirmation_policy.`
-    );
-  }
-
-  private reply(action: string, data: Record<string, unknown>): void {
+  private pump(): void {
+    if (this.active || !this.connected || this.ws?.readyState !== WebSocket.OPEN) return;
+    const entry = this.queue.shift();
+    if (!entry) return;
+    this.active = entry;
+    // Start the response deadline only when sent, not while the request is queued.
+    entry.timeout = setTimeout(() => {
+      if (this.active === entry) this.retire("TIMEOUT", `Warudo action "${entry.action}" timed out; inspect state before retrying.`);
+    }, this.callTimeoutMs);
     try {
-      this.ws?.send(JSON.stringify({ action, data }));
+      this.ws.send(entry.wire, (error) => {
+        if (error && this.active === entry) this.retire("SEND_FAILED", "Warudo request delivery failed; execution is unknown.");
+      });
     } catch {
-      /* bỏ qua */
+      this.retire("SEND_FAILED", "Warudo request delivery failed; execution is unknown.");
     }
+  }
+
+  /** Retire before releasing pending calls: late frames cannot match a newer request. */
+  private retire(code: string, message: string): void {
+    const ws = this.ws;
+    this.ws = null;
+    this.generation++;
+    this.connected = false;
+    this.isConnecting = false;
+    this.lastFrame = null;
+    this.lastFrameUpdateMs = 0;
+    const active = this.active;
+    this.active = null;
+    if (active) {
+      clearTimeout(active.timeout);
+      active.reject(new TransportError(code, message, "UNKNOWN"));
+    }
+    for (const entry of this.queue.splice(0)) {
+      entry.reject(new TransportError(code, "Queued request was not sent to Warudo.", "NOT_EXECUTED"));
+    }
+    try { ws?.terminate(); } catch { /* already closed */ }
+    if (!this.stopped) this.scheduleRetry();
   }
 
   private scheduleRetry(): void {
@@ -332,23 +273,11 @@ export class WarudoApiClient {
       this.retryTimer = null;
       void this.open();
     }, this.currentRetryDelay);
-
-    // Tăng thời gian chờ (exponential backoff)
-    this.currentRetryDelay = Math.min(this.currentRetryDelay * 1.5, MAX_RETRY_DELAY_MS);
+    this.retryTimer.unref();
+    this.currentRetryDelay = Math.min(this.currentRetryDelay * 1.5, 15_000);
   }
+}
 
-  private logOnce(msg: string): void {
-    if (msg !== this.lastLog) {
-      this.lastLog = msg;
-      console.error(msg);
-    }
-  }
-
-  private failAll(e: Error): void {
-    for (const [, p] of this.pending) {
-      clearTimeout(p.timeout);
-      p.reject(e);
-    }
-    this.pending.clear();
-  }
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value);
 }

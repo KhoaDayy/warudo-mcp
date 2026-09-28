@@ -1,7 +1,7 @@
 {
   "name": "warudo-mcp-server",
-  "version": "0.1.0",
-  "description": "Model Context Protocol (MCP) server for Warudo — lets AI assistants control outfits, materials, nodes, and blueprints.",
+  "version": "0.3.0",
+  "description": "Generic Model Context Protocol server for Warudo scene, entity, graph and runtime operations.",
   "type": "module",
   "author": "Hasukatsu",
   "license": "MIT",
@@ -10,15 +10,23 @@
     "url": "https://github.com/KhoaDayy/warudo-mcp.git"
   },
   "bin": {
-    "warudo-mcp": "dist/index.js"
+    "warudo-mcp": "dist/index.js",
+    "warudo-mcp-server": "dist/index.js"
   },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx src/index.ts"
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "check": "npm run typecheck && npm test && npm run pack:check",
+    "prepare:package": "node scripts/prepare-package.mjs",
+    "pack:check": "npm run build && node scripts/prepare-package.mjs && node scripts/check-package.mjs",
+    "prepack": "npm run build && node scripts/prepare-package.mjs",
+    "test:install": "npm run pack:check && node scripts/verify-install.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "ws": "^8.18.0",
     "zod": "^3.23.8"
   },
@@ -27,5 +35,16 @@
     "@types/ws": "^8.5.10",
     "tsx": "^4.19.0",
     "typescript": "^5.5.0"
-  }
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README.vi.md",
+    "LICENSE",
+    "runtime",
+    "docs"
+  ]
 }

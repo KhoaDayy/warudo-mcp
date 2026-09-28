@@ -1,68 +1,150 @@
-using System.Linq;
+using System;
+using System.Threading;
 using Cysharp.Threading.Tasks;
-using Newtonsoft.Json.Linq;
 using UnityEngine;
 using Warudo.Core;
 using Warudo.Core.Attributes;
 using Warudo.Core.Plugins;
+using Warudo.Core.Scenes;
 using Warudo.Core.Utils;
-using Warudo.Plugins.McpBridge.Nodes;
+using Warudo.Plugins.Core;
+using WebSocketSharp.Server;
 
 namespace Warudo.Plugins.McpBridge {
 
     /// <summary>
-    /// Plugin mod (cần build bằng Unity + Warudo SDK). Ngoài việc đăng ký asset/node,
-    /// override OnMessageReceived để nhận lệnh từ control-plane 19053 qua
-    /// "sendPluginMessage {pluginId, action, payload}" — kênh dành cho thao tác Unity-specific
-    /// mà 60 actions của API không phủ.
-    ///
-    /// Lưu ý: sendPluginMessage là fire-and-forget (không có kênh trả kết quả trực tiếp);
-    /// kết quả thay đổi sẽ tự broadcast về client qua cơ chế port/frame của Warudo.
-    /// Với action cần đọc dữ liệu, hãy dùng kênh WS 5678.
+    /// Scene-independent loopback WebSocket bridge for the runtime operations
+    /// that Warudo's native control plane does not expose.
     /// </summary>
     [PluginType(
         Id = "com.hasukatsu.warudo.mcpbridge",
         Name = "MCP Bridge",
-        Description = "WebSocket bridge để Claude (qua MCP) điều khiển Warudo: đổi đồ, glow, material, trigger blueprint, plugin channel.",
-        Version = "0.2.0",
+        Description = "Local WebSocket bridge for generic Warudo MCP runtime operations.",
+        Version = "0.3.0",
         Author = "Hasukatsu",
-        AssetTypes = new[] { typeof(McpBridgeAsset) },
-        NodeTypes = new[] { typeof(OnMcpCommandNode), typeof(EkuHashFaceTrackingNode), typeof(EkuHashAnimatorParameterBridgeNode) }
+        SupportUrl = "https://github.com/KhoaDayy/warudo-mcp"
     )]
     public class McpBridgePlugin : Plugin {
 
-        public override void OnMessageReceived(string action, string payload) {
-            UniTask.Void(async () => {
-                await UniTask.SwitchToMainThread();
-                try {
-                    if (action == "trigger") {
-                        // Không có instance service → tìm asset trong scene và bắn lệnh.
-                        var asset = Warudo.Core.Context.OpenedScene.GetAssets().Values
-                            .OfType<McpBridgeAsset>()
-                            .FirstOrDefault();
-                        if (asset == null) {
-                            Log.UserError("[McpBridge] sendPluginMessage 'trigger' — không có asset 'MCP Bridge' trong scene.");
-                            return;
-                        }
-                        var data = ParsePayload(payload);
-                        asset.TriggerCommand(data?["command"]?.Value<string>());
-                        return;
-                    }
-                    var result = McpBridgeService.ExecuteAction(action, ParsePayload(payload) ?? new JObject());
-                    if (result.ok) {
-                        Debug.Log("[McpBridge] sendPluginMessage '" + action + "' ok");
-                    } else {
-                        Log.UserError("[McpBridge] sendPluginMessage '" + action + "' thất bại: " + result.error);
-                    }
-                } catch (System.Exception e) {
-                    Log.UserError("[McpBridge] sendPluginMessage '" + action + "' lỗi: " + e.Message);
-                }
-            });
+        [DataInput]
+        [Label("PORT")]
+        [Description("Loopback WebSocket port used by the MCP runtime bridge (Default: 5678).")]
+        public int Port = 5678;
+
+        [Trigger]
+        [Label("OPEN GITHUB & SETUP GUIDE")]
+        [Description("Click to open the GitHub repository for documentation, tools catalog, and setup guides.")]
+        public void OpenDocumentation() {
+            Application.OpenURL("https://github.com/KhoaDayy/warudo-mcp");
         }
 
-        private static JObject ParsePayload(string payload) {
-            if (string.IsNullOrWhiteSpace(payload)) return null;
-            try { return JObject.Parse(payload); } catch { return null; }
+        private WebSocketServer server;
+        private CancellationTokenSource lifetime;
+        private readonly MaterialKeywordOverrideStore keywordOverrides = new MaterialKeywordOverrideStore();
+        private float nextMaterialSweep;
+        private int activePort = -1;
+
+        internal Material GetKeywordMaterial(Renderer renderer, int index) => keywordOverrides.GetOwnedMaterial(renderer, index);
+
+        public bool IsRunning => lifetime != null && !lifetime.IsCancellationRequested && server != null;
+
+        protected override void OnCreate() {
+            base.OnCreate();
+            lifetime = new CancellationTokenSource();
+            StartServer(lifetime.Token).Forget();
+        }
+
+        public override void OnUpdate() {
+            base.OnUpdate();
+            if (server != null && activePort != Port) {
+                StopServer();
+                if (lifetime != null && !lifetime.IsCancellationRequested) StartServer(lifetime.Token).Forget();
+                return;
+            }
+            if (Time.unscaledTime < nextMaterialSweep) return;
+            nextMaterialSweep = Time.unscaledTime + 5f;
+            keywordOverrides.Sweep();
+        }
+
+        public override void OnSceneUnloaded(Scene scene) {
+            // The plugin outlives scenes, but renderer/material ownership does not.
+            keywordOverrides.Clear();
+            base.OnSceneUnloaded(scene);
+        }
+
+        protected override void OnDestroy() {
+            // Cancel first so an awaited port setup cannot start a new server
+            // after the plugin has been disabled or hot-reloaded.
+            lifetime?.Cancel();
+            StopServer();
+            keywordOverrides.Clear();
+            lifetime?.Dispose();
+            lifetime = null;
+            base.OnDestroy();
+        }
+
+        private async UniTask StartServer(CancellationToken cancellationToken) {
+            await UniTask.SwitchToMainThread();
+            if (cancellationToken.IsCancellationRequested || server != null) return;
+
+            var requestedPort = Port;
+            if (requestedPort < 1 || requestedPort > 65535) {
+                Log.UserError("[McpBridge] Port must be between 1 and 65535.");
+                return;
+            }
+
+            const int maxRetries = 3;
+            for (var attempt = 1; attempt <= maxRetries; attempt++) {
+                WebSocketServer pendingServer = null;
+                try {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var wsUri = WebSocketHelpers.CreateLocalHostUri(requestedPort);
+                    var corePlugin = Context.PluginManager?.GetPlugin<CorePlugin>();
+                    if (corePlugin != null) await corePlugin.BeforeListenToPort();
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    pendingServer = new WebSocketServer(wsUri);
+                    pendingServer.AddWebSocketService<McpBridgeService>("/", it => it.Parent = this);
+                    pendingServer.Start();
+                    if (corePlugin != null) corePlugin.AfterListenToPort();
+                    server = pendingServer;
+                    activePort = requestedPort;
+                    Debug.Log($"[McpBridge] WebSocket server started at port {requestedPort}");
+                    return;
+                } catch (OperationCanceledException) {
+                    StopSafely(pendingServer);
+                    return;
+                } catch (Exception e) {
+                    StopSafely(pendingServer);
+                    if (cancellationToken.IsCancellationRequested) return;
+                    if (attempt >= maxRetries) {
+                        Log.UserError($"[McpBridge] Cannot start WebSocket server on port {requestedPort}: {e.Message}");
+                        return;
+                    }
+                    Debug.LogWarning($"[McpBridge] Port {requestedPort} unavailable, retrying ({attempt}/{maxRetries}): {e.Message}");
+                    try {
+                        await UniTask.Delay(500, cancellationToken: cancellationToken);
+                    } catch (OperationCanceledException) {
+                        return;
+                    }
+                }
+            }
+        }
+
+        private void StopServer() {
+            var current = server;
+            server = null;
+            activePort = -1;
+            StopSafely(current);
+        }
+
+        private static void StopSafely(WebSocketServer target) {
+            if (target == null) return;
+            try {
+                target.Stop();
+            } catch (Exception e) {
+                Debug.LogWarning("[McpBridge] Error stopping WebSocket server: " + e.Message);
+            }
         }
     }
 }
