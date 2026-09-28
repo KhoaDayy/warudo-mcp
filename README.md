@@ -4,6 +4,7 @@
 [![Node Version](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Protocol Version](https://img.shields.io/badge/Bridge%20Protocol-v2-blue.svg)](docs/MIGRATION.md)
+[![NPM Version](https://img.shields.io/npm/v/warudo-mcp-server.svg?logo=npm)](https://www.npmjs.com/package/warudo-mcp-server)
 [![Steam Workshop](https://img.shields.io/badge/Steam%20Workshop-MCP%20Bridge-1b2838.svg?logo=steam)](https://steamcommunity.com/sharedfiles/filedetails/?id=3809919307)
 
 [English](README.md) · [Tiếng Việt](README.vi.md)
