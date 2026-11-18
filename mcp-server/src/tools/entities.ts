@@ -19,18 +19,17 @@ export function registerEntityTools(server: McpServer, { api, bridge }: Dependen
   registerTool(server, "warudo_set_entity_port_value", "Set an entity data input. Typed values: float:2.5, int:3, bool:true, string:text, vector3:1,2,3, color:#rrggbbaa, json:{...}. Enums and asset references require json: serialized objects copied from runtime metadata. Numeric colors use a uniform 0..1 or 0..255 scale including alpha.", {
     id: nonEmpty, port: nonEmpty, value: z.string(), broadcast: z.boolean().default(false),
   }, false, async ({ id, port, value, broadcast }) => {
-    let finalValue = serializeNativeValue(parseValue(value));
-    if (value.startsWith("json:")) {
-      try {
-        const parsed = JSON.parse(finalValue);
-        if (parsed && typeof parsed === "object" && "Position" in parsed && "Rotation" in parsed && "Scale" in parsed) {
-          const safeTransform: any = { ...parsed };
-          if (typeof parsed.Position === "object") safeTransform.Position = JSON.stringify(parsed.Position);
-          if (typeof parsed.Rotation === "object") safeTransform.Rotation = JSON.stringify(parsed.Rotation);
-          if (typeof parsed.Scale === "object") safeTransform.Scale = JSON.stringify(parsed.Scale);
-          finalValue = JSON.stringify(safeTransform);
-        }
-      } catch (e) {}
+    const typed = parseValue(value);
+    let finalValue = serializeNativeValue(typed);
+    // Use the parsed type, not a raw prefix check: parseValue accepts "JSON:" and
+    // leading whitespace, and parsing has already validated the JSON document.
+    const parsed = typed.value as Record<string, unknown> | null;
+    if (typed.type === "json" && parsed && typeof parsed === "object" && !Array.isArray(parsed) && "Position" in parsed && "Rotation" in parsed && "Scale" in parsed) {
+      const safeTransform: Record<string, unknown> = { ...parsed };
+      for (const key of ["Position", "Rotation", "Scale"] as const) {
+        if (parsed[key] !== null && typeof parsed[key] === "object") safeTransform[key] = JSON.stringify(parsed[key]);
+      }
+      finalValue = JSON.stringify(safeTransform);
     }
     return result(await apiCall(api, "setEntityDataInputPortValue", { id, port, value: finalValue, broadcast }));
   });

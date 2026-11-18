@@ -65,7 +65,7 @@ async function native(t: TestContext, handler?: (ws: WebSocket, message: Message
 
 async function bridge(t: TestContext, handler?: (ws: WebSocket, message: Message) => void, options: { callTimeoutMs?: number; reconnectDelayMs?: number } = {}) {
   const f = await fixture(t, (ws, message) => { handshake(ws, message); handler?.(ws, message); });
-  const client = new WarudoBridge(f.url, { callTimeoutMs: 500, reconnectDelayMs: 30, ...options });
+  const client = new WarudoBridge(f.url, { callTimeoutMs: 500, reconnectDelayMs: 30, getToken: async () => TOKEN, ...options });
   f.stop.push(() => client.stop());
   client.connect();
   await eventually(() => client.isConnected());
@@ -182,7 +182,7 @@ test("native stop during asynchronous token discovery cannot open a socket", asy
 
 test("bridge requires a versioned handshake before exposing calls", async (t) => {
   const f = await fixture(t);
-  const client = new WarudoBridge(f.url, { callTimeoutMs: 200 });
+  const client = new WarudoBridge(f.url, { callTimeoutMs: 200, getToken: async () => TOKEN });
   f.stop.push(() => client.stop());
   client.connect();
   await eventually(() => f.messages.length === 1);
@@ -246,7 +246,7 @@ test("bridge rejects mismatched protocol versions and stop cleans handshake time
   const f = await fixture(t, (ws, message) => {
     if (message.action === "bridge_info") bridgeReply(ws, message, { protocolVersion: 1, bridgeVersion: "0.1.0", capabilities: [] });
   });
-  const client = new WarudoBridge(f.url, { callTimeoutMs: 100, reconnectDelayMs: 10 });
+  const client = new WarudoBridge(f.url, { callTimeoutMs: 100, reconnectDelayMs: 10, getToken: async () => TOKEN });
   f.stop.push(() => client.stop());
   client.connect();
   await eventually(() => f.sockets.length === 1 && f.sockets[0].readyState === WebSocket.CLOSED);
@@ -256,4 +256,34 @@ test("bridge rejects mismatched protocol versions and stop cleans handshake time
   assert.equal(f.sockets.length, 1);
 });
 
+test("bridge authenticates the handshake and every call with the plugin token", async (t) => {
+  const f = await bridge(t);
+  const request = f.client.call("inspect_entity", { id: UUID, _token: "attacker-chosen" });
+  await eventually(() => f.messages.some(({ message }) => message.action === "inspect_entity"));
+  const info = f.messages.find(({ message }) => message.action === "bridge_info")!.message;
+  const call = f.messages.find(({ message }) => message.action === "inspect_entity")!.message;
+  assert.equal(info.data._token, TOKEN);
+  assert.equal(call.data._token, TOKEN);
+  bridgeReply(f.sockets[0], call, "ok");
+  await request;
+});
 
+test("bridge does not connect until a token is available and rediscovers after rejection", async (t) => {
+  let token: string | null = null;
+  let discoveries = 0;
+  const f = await fixture(t, (ws, message) => {
+    if (message.action !== "bridge_info") return;
+    if (message.data._token === TOKEN) handshake(ws, message);
+    else ws.send(JSON.stringify({ action: "bridge_info", isResponse: true, data: { _reqId: message.data._reqId, ok: false, error: "Unauthorized" } }));
+  });
+  const client = new WarudoBridge(f.url, { callTimeoutMs: 200, reconnectDelayMs: 10, getToken: async () => { discoveries++; return token; } });
+  f.stop.push(() => client.stop());
+  client.connect();
+  await eventually(() => discoveries >= 2, "repeated token discovery");
+  assert.equal(f.sockets.length, 0);
+  token = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF";
+  await eventually(() => f.sockets.length >= 1 && f.messages.length >= 1, "rejected handshake");
+  assert.equal(client.isConnected(), false);
+  token = TOKEN;
+  await eventually(() => client.isConnected(), "authenticated reconnect");
+});

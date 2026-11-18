@@ -43,6 +43,21 @@ namespace Warudo.Plugins.McpBridge {
         private readonly MaterialKeywordOverrideStore keywordOverrides = new MaterialKeywordOverrideStore();
         private float nextMaterialSweep;
         private int activePort = -1;
+        private int lastAttemptedPort = int.MinValue;
+        private bool starting;
+
+        /// <summary>
+        /// Per-instance shared secret. Browsers can open loopback WebSockets from any
+        /// web page, so every request must prove it can read the local Warudo log.
+        /// </summary>
+        private readonly string authToken = Guid.NewGuid().ToString("N").ToUpperInvariant();
+
+        internal bool IsAuthorized(string candidate) {
+            if (candidate == null || candidate.Length != authToken.Length) return false;
+            var diff = 0;
+            for (var i = 0; i < authToken.Length; i++) diff |= char.ToUpperInvariant(candidate[i]) ^ authToken[i];
+            return diff == 0;
+        }
 
         internal Material GetKeywordMaterial(Renderer renderer, int index) => keywordOverrides.GetOwnedMaterial(renderer, index);
 
@@ -56,9 +71,11 @@ namespace Warudo.Plugins.McpBridge {
 
         public override void OnUpdate() {
             base.OnUpdate();
-            if (server != null && activePort != Port) {
+            // Restart when the configured port changes, including after a failed
+            // start (server == null), but do not retry the same failing port every frame.
+            if (!starting && lifetime != null && !lifetime.IsCancellationRequested && activePort != Port && (server != null || Port != lastAttemptedPort)) {
                 StopServer();
-                if (lifetime != null && !lifetime.IsCancellationRequested) StartServer(lifetime.Token).Forget();
+                StartServer(lifetime.Token).Forget();
                 return;
             }
             if (Time.unscaledTime < nextMaterialSweep) return;
@@ -84,10 +101,21 @@ namespace Warudo.Plugins.McpBridge {
         }
 
         private async UniTask StartServer(CancellationToken cancellationToken) {
+            if (starting) return;
+            starting = true;
+            try {
+                await StartServerCore(cancellationToken);
+            } finally {
+                starting = false;
+            }
+        }
+
+        private async UniTask StartServerCore(CancellationToken cancellationToken) {
             await UniTask.SwitchToMainThread();
             if (cancellationToken.IsCancellationRequested || server != null) return;
 
             var requestedPort = Port;
+            lastAttemptedPort = requestedPort;
             if (requestedPort < 1 || requestedPort > 65535) {
                 Log.UserError("[McpBridge] Port must be between 1 and 65535.");
                 return;
@@ -104,12 +132,19 @@ namespace Warudo.Plugins.McpBridge {
                     cancellationToken.ThrowIfCancellationRequested();
 
                     pendingServer = new WebSocketServer(wsUri);
-                    pendingServer.AddWebSocketService<McpBridgeService>("/", it => it.Parent = this);
+                    pendingServer.AddWebSocketService<McpBridgeService>("/", it => {
+                        it.Parent = this;
+                        // Browsers always send Origin; the MCP server (Node ws) does not.
+                        // Rejecting any Origin blocks cross-site WebSocket hijacking at the handshake.
+                        it.OriginValidator = origin => string.IsNullOrEmpty(origin);
+                    });
                     pendingServer.Start();
                     if (corePlugin != null) corePlugin.AfterListenToPort();
                     server = pendingServer;
                     activePort = requestedPort;
                     Debug.Log($"[McpBridge] WebSocket server started at port {requestedPort}");
+                    // Read by warudo-mcp-server from Player.log, like Warudo's native API token.
+                    Debug.Log($"[McpBridge] MCP Bridge Auth Token: {authToken}");
                     return;
                 } catch (OperationCanceledException) {
                     StopSafely(pendingServer);

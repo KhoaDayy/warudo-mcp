@@ -1,5 +1,6 @@
 import WebSocket from "ws";
 import { validateWsUrl } from "./config.js";
+import { discoverBridgeToken, validateApiToken } from "./token.js";
 
 export interface WarudoResponse {
   action: string;
@@ -31,7 +32,12 @@ type PendingCall = {
 };
 
 const CALL_TIMEOUT_MS = 20_000;
-export interface BridgeOptions { callTimeoutMs?: number; reconnectDelayMs?: number; }
+export interface BridgeOptions {
+  callTimeoutMs?: number;
+  reconnectDelayMs?: number;
+  /** Returns the plugin's per-instance auth token, or null when it is not available yet. */
+  getToken?: () => Promise<string | null>;
+}
 const INITIAL_RECONNECT_DELAY_MS = 2_000;
 const MAX_RECONNECT_DELAY_MS = 10_000;
 const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -51,6 +57,8 @@ export class WarudoBridge {
   private generation = 0;
   private readonly callTimeoutMs: number;
   private readonly initialDelay: number;
+  private readonly getToken: () => Promise<string | null>;
+  private token: string | null = null;
   private metadata: { protocolVersion: number; bridgeVersion: string; capabilities: string[] } | null = null;
 
   constructor(private url: string, options: BridgeOptions = {}) {
@@ -58,11 +66,12 @@ export class WarudoBridge {
     this.callTimeoutMs = options.callTimeoutMs ?? CALL_TIMEOUT_MS;
     this.initialDelay = options.reconnectDelayMs ?? INITIAL_RECONNECT_DELAY_MS;
     this.currentDelay = this.initialDelay;
+    this.getToken = options.getToken ?? discoverBridgeToken;
   }
 
   connect(): void {
     this.stopped = false;
-    this.open();
+    void this.open();
   }
 
   stop(): void {
@@ -95,7 +104,7 @@ export class WarudoBridge {
     let wire: string;
     try {
       // _reqId belongs to the transport; preserve data.id when it is an entity ID.
-      wire = JSON.stringify({ action, data: { ...data, _reqId: id } });
+      wire = JSON.stringify({ action, data: { ...data, _reqId: id, _token: this.token } });
       if (Buffer.byteLength(wire) > MAX_REQUEST_BYTES) throw new Error();
     } catch {
       throw new BridgeTransportError("INVALID_INPUT", "Request must be JSON and at most 1 MiB.", "NOT_EXECUTED");
@@ -122,11 +131,20 @@ export class WarudoBridge {
     });
   }
 
-  private open(): void {
+  private async open(): Promise<void> {
     if (this.stopped || this.connected || this.isConnecting || this.handshaking) return;
     this.isConnecting = true;
     const generation = ++this.generation;
     try {
+      // Re-discover on every connection: the plugin issues a new token when it restarts.
+      const discovered = await this.getToken();
+      if (this.stopped || generation !== this.generation) return;
+      if (!discovered) {
+        this.isConnecting = false;
+        this.scheduleReconnect();
+        return;
+      }
+      this.token = validateApiToken(discovered, "WARUDO_BRIDGE_TOKEN");
       const ws = new WebSocket(this.url, { handshakeTimeout: this.callTimeoutMs, maxPayload: 16 * 1024 * 1024 });
       this.ws = ws;
       ws.on("open", () => {
@@ -143,7 +161,7 @@ export class WarudoBridge {
           timeout,
         });
         try {
-          ws.send(JSON.stringify({ action: "bridge_info", data: { _reqId: id } }), (error) => {
+          ws.send(JSON.stringify({ action: "bridge_info", data: { _reqId: id, _token: this.token } }), (error) => {
             if (error && generation === this.generation) this.retire("HANDSHAKE_FAILED", "Bridge protocol handshake failed.");
           });
         } catch {
@@ -164,6 +182,7 @@ export class WarudoBridge {
         if (generation === this.generation) this.retire("DISCONNECTED", "Bridge connection closed.");
       });
     } catch {
+      if (generation !== this.generation) return;
       this.isConnecting = false;
       this.scheduleReconnect();
     }
@@ -243,6 +262,7 @@ export class WarudoBridge {
     this.isConnecting = false;
     this.handshaking = false;
     this.metadata = null;
+    this.token = null;
     const pending = [...this.pending.values()];
     this.pending.clear();
     for (const entry of pending) {
@@ -258,7 +278,7 @@ export class WarudoBridge {
     if (this.stopped || this.reconnectTimer || this.isConnecting) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      this.open();
+      void this.open();
     }, this.currentDelay);
     this.reconnectTimer.unref();
     this.currentDelay = Math.min(this.currentDelay * 1.5, MAX_RECONNECT_DELAY_MS);
