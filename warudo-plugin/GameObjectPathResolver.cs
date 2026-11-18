@@ -12,6 +12,9 @@ namespace Warudo.Plugins.McpBridge {
     /// </summary>
     internal static class GameObjectPathResolver {
 
+        private const int MaxDepth = 100;
+        private const int MaxVisited = 200000;
+
         public static bool TryResolve(GameObject root, string path, out GameObject result, out string error) {
             result = null;
             error = null;
@@ -28,7 +31,11 @@ namespace Warudo.Plugins.McpBridge {
 
             var exactMatches = new List<Transform>();
             var suffixMatches = new List<Transform>();
-            CollectMatches(root.transform, string.Empty, normalized, exactMatches, suffixMatches);
+            var visited = new[] { 0 };
+            if (!CollectMatches(root.transform, string.Empty, normalized, exactMatches, suffixMatches, 1, visited)) {
+                error = $"GameObject hierarchy exceeds the {MaxVisited} transform / {MaxDepth} depth search limit.";
+                return false;
+            }
             var matches = exactMatches.Count > 0 ? exactMatches : suffixMatches;
             if (matches.Count == 1) {
                 result = matches[0].gameObject;
@@ -48,13 +55,17 @@ namespace Warudo.Plugins.McpBridge {
             return path.Trim().Trim('/');
         }
 
-        private static void CollectMatches(
+        private static bool CollectMatches(
             Transform current,
             string prefix,
             string path,
             List<Transform> exactMatches,
-            List<Transform> suffixMatches) {
+            List<Transform> suffixMatches,
+            int depth,
+            int[] visited) {
             foreach (Transform child in current) {
+                // Bounded: this runs on Unity's main thread for every request.
+                if (depth > MaxDepth || ++visited[0] > MaxVisited) return false;
                 var relative = string.IsNullOrEmpty(prefix)
                     ? child.name
                     : prefix + "/" + child.name;
@@ -64,8 +75,9 @@ namespace Warudo.Plugins.McpBridge {
                     relative.EndsWith("/" + path, StringComparison.OrdinalIgnoreCase)) {
                     suffixMatches.Add(child);
                 }
-                CollectMatches(child, relative, path, exactMatches, suffixMatches);
+                if (!CollectMatches(child, relative, path, exactMatches, suffixMatches, depth + 1, visited)) return false;
             }
+            return true;
         }
     }
 }

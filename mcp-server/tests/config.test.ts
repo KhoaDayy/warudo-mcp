@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { loadConfig, validateWsUrl } from "../src/config.js";
-import { discoverApiToken, validateApiToken } from "../src/token.js";
+import { discoverApiToken, discoverBridgeToken, isLoopbackUrl, powershellPath, restrictAutoTokenToLoopback, validateApiToken } from "../src/token.js";
 
 const TOKEN = "0123456789ABCDEF0123456789ABCDEF";
 
@@ -46,5 +46,32 @@ test("explicit env tokens are validated and invalid overrides never silently fal
   } finally {
     if (previous === undefined) delete process.env.WARUDO_API_TOKEN;
     else process.env.WARUDO_API_TOKEN = previous;
+  }
+});
+
+test("auto-discovered tokens are only offered to loopback endpoints", async () => {
+  for (const url of ["ws://localhost:5678/", "ws://[::1]:19053/", "ws://127.0.0.1:1/", "ws://127.10.0.1/"]) assert.equal(isLoopbackUrl(url), true, url);
+  for (const url of ["ws://example.com/", "wss://192.168.1.5/", "ws://localhost.example.com/", "ws://128.0.0.1/", "not a url"]) assert.equal(isLoopbackUrl(url), false, url);
+  const discover = async () => TOKEN;
+  assert.equal(restrictAutoTokenToLoopback("ws://localhost:1/", "WARUDO_API_TOKEN", discover, {}), discover);
+  assert.equal(await restrictAutoTokenToLoopback("wss://example.com/", "WARUDO_API_TOKEN", discover, {})(), null);
+  assert.equal(await restrictAutoTokenToLoopback("wss://example.com/", "WARUDO_API_TOKEN", discover, { WARUDO_API_TOKEN: TOKEN })(), TOKEN);
+});
+
+test("PowerShell is launched by absolute path, never resolved from the working directory", () => {
+  assert.equal(powershellPath({ SystemRoot: "D:\\Win" }), "D:\\Win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+  assert.equal(powershellPath({}), "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+});
+
+test("explicit bridge tokens are validated without echoing secrets", async () => {
+  const previous = process.env.WARUDO_BRIDGE_TOKEN;
+  try {
+    process.env.WARUDO_BRIDGE_TOKEN = TOKEN.toLowerCase();
+    assert.equal(await discoverBridgeToken(), TOKEN);
+    process.env.WARUDO_BRIDGE_TOKEN = "secret-invalid-token";
+    await assert.rejects(discoverBridgeToken(), (error: Error) => error.message.includes("WARUDO_BRIDGE_TOKEN") && !error.message.includes("secret-invalid"));
+  } finally {
+    if (previous === undefined) delete process.env.WARUDO_BRIDGE_TOKEN;
+    else process.env.WARUDO_BRIDGE_TOKEN = previous;
   }
 });

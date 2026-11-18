@@ -112,6 +112,16 @@ if ($pluginSource -notmatch 'server\s*=\s*null;\s*activePort\s*=\s*-1;') {
     throw 'Bridge lifecycle contract is missing the active port reset during shutdown.'
 }
 
+# Security contract: browsers can open loopback WebSockets from any web page, so the
+# handshake must reject Origin headers and every request must carry the bridge token.
+if ($pluginSource -notmatch 'OriginValidator\s*=') {
+    throw 'Bridge security contract is missing the Origin validator.'
+}
+$serviceSourceForAuth = Get-Content -LiteralPath (Join-Path $sourceRoot 'McpBridgeService.cs') -Raw
+if ($serviceSourceForAuth -notmatch '(?s)Parent\.IsAuthorized\(token\).*?ExecuteAction\(action,\s*data,\s*Parent\)') {
+    throw 'Bridge security contract requires token authentication before ExecuteAction.'
+}
+
 # A response can become ready after the requesting client times out during scene load.
 # Keep the only raw Send call inside the transport guard so a closed socket cannot
 # escape HandleAction or trigger a second send from its error path.

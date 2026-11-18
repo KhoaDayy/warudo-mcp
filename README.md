@@ -73,13 +73,15 @@ Open PowerShell and run:
 ```powershell
 irm https://raw.githubusercontent.com/KhoaDayy/warudo-mcp/main/install.ps1 | iex
 ```
-*Verifies Node.js, purges legacy Playground scripts, and configures Claude Desktop, Cursor, Cline, Roo Code, and Windsurf automatically.*
+*Verifies Node.js, purges legacy Playground scripts, and configures Claude Desktop, Cursor, Cline, Roo Code, and Windsurf automatically. Existing configs are backed up to `~/.warudo-mcp/backups`; a config that is not valid JSON is skipped rather than overwritten.*
+
+> Piping a script into `iex` runs whatever is on the branch at that moment. If you prefer, download `install.ps1`, review it, then run it locally.
 
 #### Option B: AI Agent Self-Setup Prompt
 Copy and paste this prompt directly into your AI chat (Cursor, Claude, or Cline):
 ```text
 Please connect to my Warudo instance via MCP:
-1. Register the "warudo" MCP server in your config using command "npx" with args ["-y", "warudo-mcp-server"].
+1. Register the "warudo" MCP server in your config using command "npx" with args ["-y", "warudo-mcp-server@0.3.0"].
 2. Remind me to subscribe to the "MCP Bridge" plugin on Steam Workshop (https://steamcommunity.com/sharedfiles/filedetails/?id=3809919307) if I haven't already.
 3. Once Warudo is running with a scene open, call warudo_status to verify our live connection.
 ```
@@ -93,7 +95,7 @@ Add the server entry to your MCP client configuration file:
   "mcpServers": {
     "warudo": {
       "command": "npx",
-      "args": ["-y", "warudo-mcp-server"]
+      "args": ["-y", "warudo-mcp-server@0.3.0"]
     }
   }
 }
@@ -134,6 +136,13 @@ Port setters support explicit typed prefixes:
 | `WARUDO_WS_URL` | `ws://localhost:5678/` | Full WebSocket URL for compiled C# MCP Bridge plugin. |
 | `WARUDO_WS_HOST` / `WARUDO_WS_PORT` | `localhost` / `5678` | Host and port for C# MCP Bridge plugin. |
 | `WARUDO_API_TOKEN` | *(Auto-discovered)* | 32-character hexadecimal auth token. Discovered automatically from `Player.log`. |
+| `WARUDO_BRIDGE_TOKEN` | *(Auto-discovered)* | 32-character hexadecimal MCP Bridge token. The plugin generates a new one on start and logs it as `[McpBridge] MCP Bridge Auth Token: …` in `Player.log`. |
+
+### Security Notes
+
+* **Bridge authentication.** The bridge plugin rejects WebSocket handshakes that carry an `Origin` header (that is, connections opened by web pages) and requires its per-start token on every request. Tokens are never echoed or logged by the MCP server.
+* **Loopback only by default.** Auto-discovered tokens are sent only to `localhost`, `127.0.0.0/8` or `::1`. To use a remote endpoint, set `WARUDO_API_TOKEN` / `WARUDO_BRIDGE_TOKEN` explicitly, and prefer `wss://`.
+* **Prompt injection.** Asset names, node titles and imported blueprints (for example from Steam Workshop) are returned to the AI model verbatim. Treat them as untrusted, keep your client's tool-approval prompts enabled for mutating tools (`destructiveHint`), especially the raw `warudo_api` passthrough.
 
 ---
 

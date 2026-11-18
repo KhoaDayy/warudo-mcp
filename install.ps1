@@ -7,6 +7,10 @@
 
 $ErrorActionPreference = 'Stop'
 
+# Pin the npm package so AI clients never auto-run an unreviewed future release.
+# Bump together with mcp-server/package.json when publishing.
+$McpPackage = 'warudo-mcp-server@0.3.0'
+
 function Write-Step ($msg) { Write-Host "`n[+] $msg" -ForegroundColor Cyan }
 function Write-Success ($msg) { Write-Host "  [OK] $msg" -ForegroundColor Green }
 function Write-Warn ($msg) { Write-Host "  [!] $msg" -ForegroundColor Yellow }
@@ -58,9 +62,14 @@ if (-not (Test-Path $warudoPluginDir)) {
     New-Item -ItemType Directory -Path $warudoPluginDir -Force | Out-Null
 }
 
-$localModSource = Join-Path $PSScriptRoot "warudo-plugin\Warudo-MCP.warudo"
+# $PSScriptRoot is empty when the script runs through `irm | iex`; Join-Path would
+# throw on it, and a relative path would trust whatever folder the shell is in.
+$localModSource = $null
+if (-not [string]::IsNullOrEmpty($PSScriptRoot)) {
+    $localModSource = Join-Path $PSScriptRoot "warudo-plugin\Warudo-MCP.warudo"
+}
 
-if (Test-Path $localModSource) {
+if ($localModSource -and (Test-Path -LiteralPath $localModSource)) {
     Write-Host "Copying local Warudo-MCP.warudo to Plugins folder..." -ForegroundColor Gray
     Copy-Item $localModSource -Destination $targetModPath -Force
     Write-Success "Deployed local mod to $targetModPath"
@@ -125,22 +134,24 @@ function Register-McpConfig ($appName, $configPath) {
             $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
             $backupFile = Join-Path $backupDir "$appName`_$timestamp.json"
             Copy-Item $configPath -Destination $backupFile -Force
-            try {
-                $rawContent = Get-Content $configPath -Raw
-                if ($rawContent.Trim() -ne '') {
+            $rawContent = Get-Content -LiteralPath $configPath -Raw
+            if ($null -ne $rawContent -and $rawContent.Trim() -ne '') {
+                try {
                     $config = $rawContent | ConvertFrom-Json
-                    if (-not $config.mcpServers) {
-                        $config | Add-Member -MemberType NoteProperty -Name "mcpServers" -Value ([PSCustomObject]@{})
-                    }
+                } catch {
+                    # Never replace a config we cannot parse: it would drop the user's other MCP servers.
+                    Write-Warn "Skipped $appName - existing config is not valid JSON ($configPath). Add the 'warudo' server manually."
+                    return $false
                 }
-            } catch {
-                $config = @{ mcpServers = @{} }
+                if (-not $config.mcpServers) {
+                    $config | Add-Member -MemberType NoteProperty -Name "mcpServers" -Value ([PSCustomObject]@{}) -Force
+                }
             }
         }
 
         $warudoConfig = [PSCustomObject]@{
             command = "npx"
-            args = @("-y", "warudo-mcp-server")
+            args = @("-y", $McpPackage)
         }
 
         if ($config.mcpServers -is [PSCustomObject]) {
@@ -153,7 +164,10 @@ function Register-McpConfig ($appName, $configPath) {
             $config.mcpServers['warudo'] = $warudoConfig
         }
 
-        $config | ConvertTo-Json -Depth 10 | Set-Content $configPath -Encoding UTF8
+        # UTF-8 without BOM: Windows PowerShell 5.1's "-Encoding UTF8" writes a BOM,
+        # which JSON.parse-based clients reject.
+        $json = $config | ConvertTo-Json -Depth 32
+        [System.IO.File]::WriteAllText($configPath, $json, (New-Object System.Text.UTF8Encoding $false))
         Write-Success "$appName registered successfully!"
         return $true
     } catch {
@@ -194,7 +208,7 @@ Write-Host "==========================================================" -Foregro
 Write-Host @"
 [ Summary ]
 * Pre-built Mod Plugin : Installed to $targetModPath
-* AI Apps Registered   : $registeredCount app(s) configured with npx -y warudo-mcp-server
+* AI Apps Registered   : $registeredCount app(s) configured with npx -y $McpPackage
 * Config Backups       : Saved to $backupDir
 
 [ Next Steps ]

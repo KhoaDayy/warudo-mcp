@@ -45,9 +45,18 @@ namespace Warudo.Plugins.McpBridge {
                     id = reqTok.Value<int>();
                 }
                 if (id <= 0) throw new ArgumentException("Missing positive integer _reqId.");
+                if (Parent == null || !Parent.IsRunning) throw new InvalidOperationException("Bridge is stopping or unavailable.");
+
+                // Authenticate before touching the payload further. The token is removed so
+                // it can never be echoed back, logged, or forwarded to an action handler.
+                var tokenTok = data["_token"];
+                var token = tokenTok != null && tokenTok.Type == JTokenType.String ? tokenTok.Value<string>() : null;
+                data.Remove("_token");
+                if (!Parent.IsAuthorized(token)) {
+                    throw new UnauthorizedAccessException("Unauthorized: missing or invalid MCP Bridge token. Update warudo-mcp-server, or set WARUDO_BRIDGE_TOKEN from the '[McpBridge] MCP Bridge Auth Token' line in Player.log.");
+                }
                 if (System.Text.Encoding.UTF8.GetByteCount(data.ToString(Formatting.None)) > MaxRequestBytes) throw new ArgumentException("Request payload exceeds 1 MiB.");
 
-                if (Parent == null || !Parent.IsRunning) throw new InvalidOperationException("Bridge is stopping or unavailable.");
                 // Handshake and health checks do not touch scene state. Answer them on
                 // the WebSocket thread so a busy scene load cannot cause reconnect timeouts.
                 if (action != "ping" && action != "bridge_info") await UniTask.SwitchToMainThread();
@@ -468,7 +477,7 @@ namespace Warudo.Plugins.McpBridge {
             var port = node.GetDataInputPort(input);
             if (port == null) throw new ArgumentException("Unknown data input: " + input);
             var value = ParseInputValue(data?["value"] as JObject);
-            if (value is JToken jsonValue) value = jsonValue.ToObject(port.Type);
+            if (value is JToken jsonValue) value = jsonValue.ToObject(port.Type, CreateSafeSerializer());
             else if (port.Type.IsEnum && value is string enumName) {
                 try {
                     value = Enum.Parse(port.Type, enumName, true);
@@ -480,7 +489,28 @@ namespace Warudo.Plugins.McpBridge {
             if ((value == null && port.Type.IsValueType && Nullable.GetUnderlyingType(port.Type) == null) || (value != null && !port.Type.IsInstanceOfType(value))) throw new ArgumentException("Value type does not match data input " + input + ". Expected " + TypeLabel(port.Type) + ".");
             node.SetDataInput(input, value);
             node.BroadcastDataInput(input);
-            return new { blueprint = graphName, node = nodeKey, input, value };
+            // Summarize: raw Unity values (e.g. Vector3.normalized) can fail to serialize
+            // after the write already happened, which would misreport an applied change.
+            object summary;
+            try { summary = SafeValue(value); } catch (Exception) { summary = "(applied; value too large to display)"; }
+            return new { blueprint = graphName, node = nodeKey, input, value = summary };
+        }
+
+        /// <summary>
+        /// Keeps Warudo's registered converters but never honours $type/$ref metadata,
+        /// even if global Newtonsoft defaults enable TypeNameHandling.
+        /// </summary>
+        private static JsonSerializer CreateSafeSerializer() {
+            var defaults = JsonConvert.DefaultSettings?.Invoke();
+            var settings = new JsonSerializerSettings {
+                TypeNameHandling = TypeNameHandling.None,
+                MetadataPropertyHandling = MetadataPropertyHandling.Ignore,
+            };
+            if (defaults != null) {
+                settings.Converters = defaults.Converters;
+                if (defaults.ContractResolver != null) settings.ContractResolver = defaults.ContractResolver;
+            }
+            return JsonSerializer.Create(settings);
         }
 
         private static Graph FindGraph(string key) {

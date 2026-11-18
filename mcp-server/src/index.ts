@@ -3,12 +3,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { loadConfig } from "./config.js";
 import { WarudoBridge } from "./warudoBridge.js";
 import { WarudoApiClient } from "./warudoApi.js";
-import { discoverApiToken } from "./token.js";
+import { discoverApiToken, discoverBridgeToken, restrictAutoTokenToLoopback } from "./token.js";
 import { createServer } from "./server.js";
 
 const config = loadConfig();
-const api = new WarudoApiClient(config.apiWsUrl, discoverApiToken);
-const bridge = new WarudoBridge(config.wsUrl);
+const api = new WarudoApiClient(config.apiWsUrl, restrictAutoTokenToLoopback(config.apiWsUrl, "WARUDO_API_TOKEN", discoverApiToken));
+const bridge = new WarudoBridge(config.wsUrl, {
+  getToken: restrictAutoTokenToLoopback(config.wsUrl, "WARUDO_BRIDGE_TOKEN", discoverBridgeToken),
+});
 const server = createServer({ api, bridge, config });
 let stopped = false;
 
