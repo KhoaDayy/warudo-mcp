@@ -269,3 +269,210 @@ test("tool schema rejects wrong types before any native operation", async () => 
     assert.equal(session.calls.length, 0);
   } finally { await session.close(); }
 });
+
+function boneApi() {
+  let stored: string = "[]";
+  const sets: unknown[] = [];
+  const api: ServerDependencies["api"] = {
+    call: async (action, data) => {
+      const d = data as { id?: string; port?: string; value?: string };
+      if (action === "getEntityDataInputPortValue") return { action, data: stored };
+      if (action === "setEntityDataInputPortValue") { stored = String(d.value); sets.push(d); return { action, data: true }; }
+      return { action, data: null };
+    },
+    isConnected: () => true, getLastFrame: () => null, getConfirmationPolicy: () => "manual", getRecentAutoReplies: () => [],
+  };
+  return { api, sets };
+}
+
+const CHARACTER = "29399e49-1c26-41bb-b40f-294dc0590f68";
+
+test("bone catalog lists humanoid bones with stable ids and groups", async () => {
+  const session = await setup();
+  try {
+    const all = decode(await session.client.callTool({ name: "warudo_list_bones", arguments: {} }));
+    assert.equal(all.count, 55);
+    assert.deepEqual(all.bones.filter((b: { id: number }) => b.id === 10 || b.id === 14).map((b: { name: string }) => b.name), ["Head", "RightUpperArm"]);
+    const rightArm = decode(await session.client.callTool({ name: "warudo_list_bones", arguments: { group: "right arm" } }));
+    assert.deepEqual(rightArm.bones.map((b: { name: string }) => b.name), ["RightShoulder", "RightUpperArm", "RightLowerArm", "RightHand"]);
+    assert.equal(session.calls.length, 0);
+  } finally { await session.close(); }
+});
+
+test("bone offsets merge, toggle, replace and clear against the character port", async () => {
+  const { api, sets } = boneApi();
+  const session = await setup({ api });
+  try {
+    const call = async (name: string, args: Record<string, unknown>) => session.client.callTool({ name, arguments: args });
+
+    const first = decode(await call("warudo_set_bone_offsets", { character: CHARACTER, offsets: [{ bone: "right upper arm", rotation: [0, 0, 60] }] }));
+    assert.deepEqual(first.offsets, [{ bone: "RightUpperArm", boneId: 14, enabled: true, rotation: { x: 0, y: 0, z: 60 }, applyWhileTracked: true }]);
+    const sent = JSON.parse((sets[0] as { value: string }).value);
+    assert.equal(sent.length, 1);
+    assert.equal(JSON.parse(sent[0].dataInputs.Bone.value).value, 14);
+    assert.deepEqual(JSON.parse(sent[0].dataInputs.RotationOffset.value), { x: 0, y: 0, z: 60 });
+
+    const second = decode(await call("warudo_set_bone_offsets", { character: CHARACTER, offsets: [{ bone: 13, rotation: [10, 0, -20] }] }));
+    assert.deepEqual(second.offsets.map((o: { bone: string }) => o.bone).sort(), ["LeftUpperArm", "RightUpperArm"]);
+
+    const toggled = decode(await call("warudo_set_bone_offsets", { character: CHARACTER, offsets: [{ bone: "RightUpperArm", enabled: false }] }));
+    const arm = toggled.offsets.find((o: { bone: string }) => o.bone === "RightUpperArm");
+    assert.equal(arm.enabled, false);
+    assert.equal(arm.rotation.z, 60, "toggling keeps the stored rotation");
+
+    const replaced = decode(await call("warudo_set_bone_offsets", { character: CHARACTER, mode: "replace", offsets: [{ bone: "Head", rotation: [5, 0, 0] }] }));
+    assert.deepEqual(replaced.offsets.map((o: { bone: string }) => o.bone), ["Head"]);
+
+    await call("warudo_set_bone_offsets", { character: CHARACTER, offsets: [{ bone: "Hips", rotation: [0, 15, 0] }] });
+    const partial = decode(await call("warudo_clear_bone_offsets", { character: CHARACTER, bones: ["head"] }));
+    assert.equal(partial.removed, 1);
+    assert.deepEqual(partial.offsets.map((o: { bone: string }) => o.bone), ["Hips"]);
+    const cleared = decode(await call("warudo_clear_bone_offsets", { character: CHARACTER }));
+    assert.equal(cleared.count, 0);
+    assert.equal(decode(await call("warudo_get_bone_offsets", { character: CHARACTER })).count, 0);
+  } finally { await session.close(); }
+});
+
+test("bone offset input errors never reach Warudo", async () => {
+  const { api, sets } = boneApi();
+  const session = await setup({ api });
+  try {
+    const bad: Array<Record<string, unknown>> = [
+      { character: CHARACTER, offsets: [{ bone: "Tail", rotation: [0, 0, 0] }] },
+      { character: CHARACTER, offsets: [{ bone: 99, rotation: [0, 0, 0] }] },
+      { character: CHARACTER, offsets: [{ bone: "Head", rotation: [0, 0, 0] }, { bone: "head", rotation: [1, 1, 1] }] },
+      { character: CHARACTER, offsets: [{ bone: "Head" }] },
+      { character: CHARACTER, offsets: [{ bone: "Head", rotation: [0, 0, 999] }] },
+      { character: CHARACTER, offsets: [{ bone: "Head", rotation: [0, 0, 0], extra: true }] },
+      { character: CHARACTER, offsets: [] },
+    ];
+    for (const args of bad) {
+      const response = await session.client.callTool({ name: "warudo_set_bone_offsets", arguments: args });
+      assert.equal(response.isError, true, JSON.stringify(args));
+    }
+    assert.equal(sets.length, 0);
+  } finally { await session.close(); }
+});
+
+test("bone tools resolve a character by name and report ambiguity", async () => {
+  const { api } = boneApi();
+  const groups = [{ category: "CATEGORY_CHARACTERS", assets: [
+    { id: CHARACTER, name: "Character 1", typeId: "726ab674-a550-474e-8b92-66526a5ad55e" },
+    { id: "bc77a8de-5252-4bb9-bbfa-ec65adb66c66", name: "Camera 1", typeId: "6a05ecf3-1501-4cab-b9d7-84131b881a29" },
+  ] }];
+  const bridge: ServerDependencies["bridge"] = { call: async (action) => ({ action, ok: true, data: groups }), isConnected: () => true };
+  const session = await setup({ api, bridge });
+  try {
+    assert.equal(decode(await session.client.callTool({ name: "warudo_get_bone_offsets", arguments: {} })).character, CHARACTER);
+    assert.equal(decode(await session.client.callTool({ name: "warudo_get_bone_offsets", arguments: { character: "character 1" } })).character, CHARACTER);
+    const missing = await session.client.callTool({ name: "warudo_get_bone_offsets", arguments: { character: "Nobody" } });
+    assert.equal(missing.isError, true);
+    groups[0].assets.push({ id: "99999999-9999-4999-8999-999999999999", name: "Character 2", typeId: "726ab674-a550-474e-8b92-66526a5ad55e" });
+    const ambiguous = await session.client.callTool({ name: "warudo_get_bone_offsets", arguments: {} });
+    assert.equal(ambiguous.isError, true);
+  } finally { await session.close(); }
+});
+
+import { mkdtemp, readFile as readFileFs, writeFile as writeFileFs, readdir as readdirFs, rm as rmFs } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
+
+async function withPoseDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(joinPath(tmpdir(), "warudo-poses-"));
+  const previous = process.env.WARUDO_MCP_POSES_DIR;
+  process.env.WARUDO_MCP_POSES_DIR = dir;
+  try { return await run(dir); }
+  finally {
+    if (previous === undefined) delete process.env.WARUDO_MCP_POSES_DIR; else process.env.WARUDO_MCP_POSES_DIR = previous;
+    await rmFs(dir, { recursive: true, force: true });
+  }
+}
+
+test("pose library saves, lists, applies, protects and deletes poses", async () => {
+  await withPoseDir(async (dir) => {
+    const { api, sets } = boneApi();
+    const session = await setup({ api });
+    try {
+      const call = (name: string, args: Record<string, unknown>) => session.client.callTool({ name, arguments: args });
+
+      const empty = await call("warudo_save_pose", { name: "wave", character: CHARACTER });
+      assert.equal(empty.isError, true, "nothing to save yet");
+
+      await call("warudo_set_bone_offsets", { character: CHARACTER, offsets: [{ bone: "RightUpperArm", rotation: [0, 0, 70] }, { bone: "Head", rotation: [0, 0, 12], enabled: false }] });
+      const saved = decode(await call("warudo_save_pose", { name: "Wave", description: "Right hand wave", character: CHARACTER }));
+      assert.equal(saved.saved, "wave");
+      assert.equal(saved.bones, 2);
+
+      const dup = await call("warudo_save_pose", { name: "wave", character: CHARACTER });
+      assert.equal(dup.isError, true);
+      assert.equal(decode(await call("warudo_save_pose", { name: "wave", character: CHARACTER, overwrite: true })).saved, "wave");
+
+      const listed = decode(await call("warudo_list_poses", {}));
+      assert.deepEqual(listed.poses.map((p: { name: string; bones: number }) => [p.name, p.bones]), [["wave", 2]]);
+
+      await call("warudo_clear_bone_offsets", { character: CHARACTER });
+      const applied = decode(await call("warudo_apply_pose", { name: "wave", character: CHARACTER }));
+      assert.deepEqual(applied.offsets.map((o: { bone: string; enabled: boolean }) => [o.bone, o.enabled]), [["RightUpperArm", true], ["Head", false]]);
+      assert.ok(sets.length > 0);
+
+      assert.equal((await call("warudo_apply_pose", { name: "nope", character: CHARACTER })).isError, true);
+      assert.equal(decode(await call("warudo_delete_pose", { name: "wave" })).deleted, "wave");
+      assert.equal((await call("warudo_delete_pose", { name: "wave" })).isError, true);
+      assert.deepEqual(await readdirFs(dir), []);
+    } finally { await session.close(); }
+  });
+});
+
+test("pose names cannot escape the library and corrupt files are reported", async () => {
+  await withPoseDir(async (dir) => {
+    const { api } = boneApi();
+    const session = await setup({ api });
+    try {
+      const call = (name: string, args: Record<string, unknown>) => session.client.callTool({ name, arguments: args });
+      for (const name of ["../evil", "a/b", "..", "con", "", " ", "x".repeat(65), ".hidden"]) {
+        const response = await call("warudo_apply_pose", { name });
+        assert.equal(response.isError, true, JSON.stringify(name));
+        assert.equal((await call("warudo_delete_pose", { name })).isError, true, JSON.stringify(name));
+      }
+      await writeFileFs(joinPath(dir, "broken.json"), "{not json");
+      await writeFileFs(joinPath(dir, "badshape.json"), JSON.stringify({ version: 1, name: "badshape", savedAt: "x", offsets: [{ bone: "Head" }] }));
+      assert.equal((await call("warudo_apply_pose", { name: "broken" })).isError, true);
+      const listed = decode(await call("warudo_list_poses", {}));
+      assert.equal(listed.count, 0);
+      assert.deepEqual(listed.skipped.sort(), ["badshape.json", "broken.json"]);
+      assert.equal(await readFileFs(joinPath(dir, "broken.json"), "utf8"), "{not json");
+    } finally { await session.close(); }
+  });
+});
+
+test("pose_and_capture poses then returns the photo, and needs exactly one pose source", async () => {
+  await withPoseDir(async () => {
+    const { api, sets } = boneApi();
+    const order: string[] = [];
+    const bridge: ServerDependencies["bridge"] & { getCapabilities?: () => string[] } = {
+      call: async (action) => {
+        order.push(action);
+        return { action, ok: true, data: action === "capture_viewport"
+          ? { mimeType: "image/jpeg", width: 640, height: 360, byteLength: 3, camera: "Main", base64: "AQID" } : [] };
+      },
+      isConnected: () => true,
+      getCapabilities: () => ["capture_viewport"],
+    };
+    const session = await setup({ api, bridge });
+    try {
+      const call = (args: Record<string, unknown>) => session.client.callTool({ name: "warudo_pose_and_capture", arguments: args });
+      const shot = await call({ character: CHARACTER, offsets: [{ bone: "Head", rotation: [0, 0, 10] }], settleMs: 0, width: 640, height: 360 });
+      const content = shot.content as Array<{ type: string; data?: string; text?: string }>;
+      assert.equal(content[0].type, "image");
+      assert.equal(content[0].data, "AQID");
+      assert.equal(JSON.parse(content[2].text!).bones, 1);
+      assert.equal(sets.length, 1, "posed before the capture");
+      assert.deepEqual(order, ["capture_viewport"]);
+
+      assert.equal((await call({ character: CHARACTER })).isError, true, "neither pose nor offsets");
+      assert.equal((await call({ character: CHARACTER, pose: "wave", offsets: [{ bone: "Head", rotation: [0, 0, 0] }] })).isError, true, "both");
+      assert.equal((await call({ character: CHARACTER, pose: "missing", settleMs: 0 })).isError, true, "unknown pose");
+      assert.equal(sets.length, 1, "failed requests do not change the pose");
+    } finally { await session.close(); }
+  });
+});
