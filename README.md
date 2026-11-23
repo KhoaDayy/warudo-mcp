@@ -105,7 +105,7 @@ Add the server entry to your MCP client configuration file:
 
 ## Tool Surface
 
-The server exposes 27 strongly-typed tools categorized into 7 functional domains:
+The server exposes 29 strongly-typed tools categorized into 8 functional domains:
 
 | Domain | Tools | Description |
 |---|---|---|
@@ -115,6 +115,7 @@ The server exposes 27 strongly-typed tools categorized into 7 functional domains
 | **Blueprints** | `warudo_get_selected_graph`, `warudo_list_graphs`, `warudo_list_blueprints`, `warudo_import_graph`, `warudo_export_graph`, `warudo_set_node_data_input` | List graphs compactly (`warudo_list_graphs`: id, name, enabled, node count, filter + pagination) or with full node metadata; serialize and import with `dryRun` validation. |
 | **Graph Editing** | `warudo_manage_graph`, `warudo_manage_node`, `warudo_manage_connection`, `warudo_invoke_flow` | Create/remove/rename graphs, manage nodes, wire pins, and trigger flow inputs. |
 | **Unity Runtime** | `warudo_list_hierarchy`, `warudo_set_gameobject_active`, `warudo_set_material_property` | Traverse GameObject hierarchy, toggle objects, and apply material properties. |
+| **Vision & Editor** | `warudo_capture_viewport`, `warudo_sync_scene` | Capture a JPEG from the active scene camera as an inline image (works while Warudo is minimized), and refresh the editor UI after changes made through MCP. Both need the updated bridge plugin (`capture_viewport` / `sync_scene` capabilities). |
 | **Compatibility** | `warudo_api` | Raw passthrough for native Warudo actions not covered by typed tools. |
 
 ### Value Formatting & Validation
@@ -165,7 +166,7 @@ warudo-mcp/
 │   │   ├── values.ts              # Value validation & TransformData safety wrapper
 │   │   ├── warudoApi.ts           # Native WebSocket client (:19053)
 │   │   └── warudoBridge.ts        # Protocol v2 Bridge client (:5678)
-│   └── tests/                     # Automated test suite (45 tests)
+│   └── tests/                     # Automated test suite (47 tests)
 └── warudo-plugin/                 # C# Unity Plugin sources (UMod / .NET Framework)
     ├── Warudo-MCP.warudo          # Prebuilt mod (Warudo Mod Tools, Unity 2021.3.45f2)
     ├── McpBridgePlugin.cs         # Auto-starting [PluginType] lifecycle
@@ -192,7 +193,7 @@ npm run build
 ```powershell
 npm run dev             # Run development server with tsx
 npm run typecheck       # Verify TypeScript types without emitting
-npm test                # Execute Node.js automated test runner (45 tests)
+npm test                # Execute Node.js automated test runner (47 tests)
 npm run check           # Run typecheck, tests, and npm pack allowlist verification
 ```
 
