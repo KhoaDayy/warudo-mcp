@@ -10,9 +10,11 @@ const MAX_BLUEPRINT_NODES = 10_000;
 const MAX_BLUEPRINT_CONNECTIONS = 50_000;
 
 export function registerGraphTools(server: McpServer, { api, bridge }: Dependencies): void {
+  // Graphs have no category, so the shared page filter's category would only ever match nothing.
+  const { category: _category, ...graphPageSchema } = pageSchema;
   registerTool(server, "warudo_get_selected_graph", "Read the graph currently selected in the Warudo editor.", {}, true, async () => result(await apiCall(api, "getSelectedGraph")));
   registerTool(server, "warudo_list_graphs", "List blueprint IDs, names, enabled state and node counts without loading all node inputs. Supports filtering and pagination.", {
-    ...pageSchema,
+    ...graphPageSchema,
   }, true, async (filter) => {
     const graphs = await bridgeCall(bridge, "list_graphs");
     return result({ source: "bridge", ...page((Array.isArray(graphs) ? graphs : []).map(asRecord), filter) });

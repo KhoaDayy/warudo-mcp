@@ -210,6 +210,18 @@ test("sync_scene forwards the optional graph and requires bridge support", async
   } finally { await session.close(); }
 });
 
+test("graph listing does not expose a category filter that can never match", async () => {
+  const session = await setup();
+  try {
+    const tool = (await session.client.listTools()).tools.find((t) => t.name === "warudo_list_graphs");
+    assert.ok(tool);
+    const props = Object.keys((tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {});
+    assert.deepEqual(props.sort(), ["limit", "offset", "query"]);
+    const assets = (await session.client.listTools()).tools.find((t) => t.name === "warudo_list_assets");
+    assert.ok(Object.keys((assets!.inputSchema as { properties?: Record<string, unknown> }).properties ?? {}).includes("category"));
+  } finally { await session.close(); }
+});
+
 test("blueprint dry-run accepts exported node dictionaries and validates connections", async () => {
   const session = await setup();
   try {

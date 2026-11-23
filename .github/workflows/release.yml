@@ -1,10 +1,10 @@
 name: Release
-# Push a tag like v0.3.1 (must match mcp-server/package.json version).
-# Builds and tests, attaches the npm tarball (and Warudo-MCP.warudo if committed)
-# to a GitHub Release, and publishes to npm when the NPM_TOKEN secret is set.
+# Manual fallback. Normal releases come from release-please.yml.
+# Run it against an existing tag (Actions > Release > Run workflow > pick the tag
+# as the ref), for example to retry a failed npm publish. It re-checks that the
+# tag matches mcp-server/package.json, creates the GitHub Release only if it is
+# missing, and publishes to npm when the NPM_TOKEN secret is set.
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
 permissions:
   contents: write
