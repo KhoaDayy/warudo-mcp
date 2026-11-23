@@ -21,7 +21,7 @@ Claude ──(stdio MCP)──► MCP server (Node/TS)
 ```
 warudo-mcp/
 ├── mcp-server/                 ← MCP server (Node/TypeScript) — phần "Claude nhìn thấy"
-│   ├── src/index.ts            ← định nghĩa 26 tool
+│   ├── src/index.ts            ← định nghĩa 27 tool
 │   ├── src/warudoApi.ts        ← client control-plane Warudo 19053 (subprotocol token)
 │   ├── src/token.ts            ← tự động tìm token API (log / companion client / env)
 │   ├── src/warudoBridge.ts     ← WebSocket client kênh cũ + auto-reconnect
@@ -52,7 +52,9 @@ warudo-mcp/
 2. Khởi động Warudo → mở scene → thêm asset **"MCP Bridge"** (search "MCP").
 3. Kiểm tra Console/Log thấy `[McpBridge] WebSocket server started at port 5678`.
 
-**Cách build thành plugin mod (cần Unity + Warudo SDK + Warudo Mod Tool) — ⚠️ tạm hoãn:**
+> **Cập nhật:** mod `Warudo-MCP.warudo` hiện đã build được và đính kèm trong [GitHub Release](https://github.com/KhoaDayy/warudo-mcp/releases/latest). Hướng dẫn mới (Mod Tools, tạo `.csproj`, quy tắc cấm `System.Reflection`, CI/CD, quy trình release) nằm trong [README.md](README.md#building-the-plugin). Phần dưới đây là ghi chú cũ, giữ để tham khảo.
+
+**Cách build thành plugin mod (cần Unity + Warudo SDK + Warudo Mod Tool) — ghi chú cũ:**
 
 Công cụ build chính thức là repo **HakuyaLabs/Warudo-Mod-Tool** (`https://github.com/HakuyaLabs/Warudo-Mod-Tool.git` — UPM package `app.warudo.modtool`, kèm full SDK `Warudo.Core` + native plugins websocket-sharp/EmbedIO). Flow đúng theo docs *"Creating Your First Plugin Mod"*:
 
@@ -96,7 +98,7 @@ claude mcp add warudo -s user -- npx tsx C:\Users\Hasukatsu\warudo-mcp\mcp-serve
 
 ---
 
-## 🛠️ Các tool Claude có (26 tool — 2 kênh)
+## 🛠️ Các tool Claude có (27 tool — 2 kênh)
 
 ### Kênh (1) — Control-plane API tích hợp sẵn (`ws://localhost:19053`, có token)
 
@@ -130,6 +132,7 @@ claude mcp add warudo -s user -- npx tsx C:\Users\Hasukatsu\warudo-mcp\mcp-serve
 | `warudo_set_gameobject_active` | Bật/tắt 1 mesh bất kỳ |
 | `warudo_set_material_property` | Đổi thuộc tính material (`_EmissionColor`, `_EmissionMultiply`…) |
 | `warudo_trigger` | Kích hoạt node `On MCP Command` trong blueprint |
+| `warudo_list_graphs` | Liệt kê blueprint dạng gọn (id, tên, trạng thái bật, số node), có lọc `query` và phân trang `offset`/`limit` — nhẹ hơn `warudo_list_blueprints` |
 | `warudo_list_blueprints` | Xem toàn bộ blueprint + từng node (id, typeId, title, data inputs) |
 | `warudo_set_node_data_input` | Đổi giá trị 1 data input của node (giá trị kiểu `float:`, `int:`, `bool:`, `string:`, `enum:`, `color:`, `vector3:`) |
 | `warudo_create_blueprint` | Tạo blueprint mới từ JSON định dạng Warudo (`dryRun=true` để kiểm tra an toàn) |

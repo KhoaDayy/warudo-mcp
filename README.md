@@ -64,7 +64,7 @@ TypeScript MCP Server (warudo-mcp-server)
 Subscribe to the official mod on Steam Workshop (no Unity compilation required):
 👉 [**MCP Bridge on Steam Workshop**](https://steamcommunity.com/sharedfiles/filedetails/?id=3809919307)
 
-*Alternatively, compile `warudo-plugin/` with Warudo Mod Tools and place `Warudo-MCP.warudo` into `%APPDATA%\..\LocalLow\HakuyaLabs\Warudo\Plugins\`.*
+*Alternatively, download `Warudo-MCP.warudo` from the [latest GitHub Release](https://github.com/KhoaDayy/warudo-mcp/releases/latest) (or `warudo-plugin/Warudo-MCP.warudo` in this repo) and place it into `%APPDATA%\..\LocalLow\HakuyaLabs\Warudo\Plugins\`. Restart Warudo afterwards. To build it yourself, see [Building the Plugin](#building-the-plugin).*
 
 ### 2. Configure Your AI Client
 
@@ -105,14 +105,14 @@ Add the server entry to your MCP client configuration file:
 
 ## Tool Surface
 
-The server exposes 26 strongly-typed tools categorized into 7 functional domains:
+The server exposes 27 strongly-typed tools categorized into 7 functional domains:
 
 | Domain | Tools | Description |
 |---|---|---|
 | **Health** | `warudo_status`, `warudo_frame_state` | Inspect host PID, active scene, FPS, and frame counter. |
-| **Scene Discovery** | `warudo_scene_inventory`, `warudo_list_assets`, `warudo_get_selected_asset`, `warudo_get_plugins`, `warudo_get_asset_types`, `warudo_get_node_types` | Enumerate scene objects, plugins, asset types, and blueprint node catalogs. |
+| **Scene Discovery** | `warudo_scene_inventory`, `warudo_list_assets`, `warudo_get_selected_asset`, `warudo_get_plugins`, `warudo_get_asset_types`, `warudo_get_node_types` | Enumerate scene objects, plugins, asset types, and blueprint node catalogs. `warudo_list_assets` filters (`query`, `category`, `typeId`) and paginates (`offset`, `limit`) on the Unity side when the plugin advertises `list_assets_page`; older plugins fall back to client-side filtering. |
 | **Entity** | `warudo_inspect_entity`, `warudo_get_entity_port_value`, `warudo_set_entity_port_value`, `warudo_invoke_entity_trigger`, `warudo_send_plugin_message` | Read/write data ports, fire trigger buttons, and dispatch plugin messages. |
-| **Blueprints** | `warudo_get_selected_graph`, `warudo_list_blueprints`, `warudo_import_graph`, `warudo_export_graph`, `warudo_set_node_data_input` | List and serialize blueprint graphs; import with `dryRun` validation. |
+| **Blueprints** | `warudo_get_selected_graph`, `warudo_list_graphs`, `warudo_list_blueprints`, `warudo_import_graph`, `warudo_export_graph`, `warudo_set_node_data_input` | List graphs compactly (`warudo_list_graphs`: id, name, enabled, node count, filter + pagination) or with full node metadata; serialize and import with `dryRun` validation. |
 | **Graph Editing** | `warudo_manage_graph`, `warudo_manage_node`, `warudo_manage_connection`, `warudo_invoke_flow` | Create/remove/rename graphs, manage nodes, wire pins, and trigger flow inputs. |
 | **Unity Runtime** | `warudo_list_hierarchy`, `warudo_set_gameobject_active`, `warudo_set_material_property` | Traverse GameObject hierarchy, toggle objects, and apply material properties. |
 | **Compatibility** | `warudo_api` | Raw passthrough for native Warudo actions not covered by typed tools. |
@@ -150,7 +150,10 @@ Port setters support explicit typed prefixes:
 
 ```txt
 warudo-mcp/
-├── .github/workflows/ci.yml       # Multi-platform CI (Ubuntu & Windows)
+├── .github/
+│   ├── workflows/ci.yml           # Multi-platform CI (Ubuntu & Windows)
+│   ├── workflows/release.yml      # Tag-driven GitHub Release (+ optional npm publish)
+│   └── dependabot.yml             # Weekly npm and Actions updates
 ├── docs/
 │   ├── MIGRATION.md               # Upgrading from v0.1/v0.2 to v0.3 protocol v2
 │   └── VERIFICATION.md            # Automated testing & live acceptance matrix
@@ -162,8 +165,9 @@ warudo-mcp/
 │   │   ├── values.ts              # Value validation & TransformData safety wrapper
 │   │   ├── warudoApi.ts           # Native WebSocket client (:19053)
 │   │   └── warudoBridge.ts        # Protocol v2 Bridge client (:5678)
-│   └── tests/                     # Automated test suite (37 tests)
+│   └── tests/                     # Automated test suite (45 tests)
 └── warudo-plugin/                 # C# Unity Plugin sources (UMod / .NET Framework)
+    ├── Warudo-MCP.warudo          # Prebuilt mod (Warudo Mod Tools, Unity 2021.3.45f2)
     ├── McpBridgePlugin.cs         # Auto-starting [PluginType] lifecycle
     ├── McpBridgeService.cs        # WebSocketSharp RPC service
     ├── GameObjectPathResolver.cs  # Reflection-free hierarchy resolver
@@ -188,7 +192,7 @@ npm run build
 ```powershell
 npm run dev             # Run development server with tsx
 npm run typecheck       # Verify TypeScript types without emitting
-npm test                # Execute Node.js automated test runner (37 tests)
+npm test                # Execute Node.js automated test runner (45 tests)
 npm run check           # Run typecheck, tests, and npm pack allowlist verification
 ```
 
@@ -199,6 +203,23 @@ To compile the C# plugin sources against your local Warudo installation:
 ```powershell
 powershell -NoProfile -File scripts/check-bridge.ps1
 ```
+
+### Building the Plugin
+
+The `.warudo` mod is packaged by **Warudo Mod Tools** inside a Unity 2021.3 project; CI cannot build it.
+
+1. Copy the four `warudo-plugin/*.cs` files into a folder inside your Mod Tools project (for example `Assets/McpBridge/`).
+2. In **Warudo → Mod Settings**, create an export profile pointing at that folder.
+3. Make sure Unity has generated `.csproj` files (**Edit → Preferences → External Tools → Regenerate project files**). Without them the export succeeds but contains no code (about 275 bytes).
+4. Run **Warudo → Build Mod**. Copy the result to `warudo-plugin/Warudo-MCP.warudo` (it is git-ignored, so use `git add -f`).
+
+> Mod code must not reference `System.Reflection`. UMod's security verifier rejects it, and `Type.Name` counts (it is `MemberInfo.get_Name`). Use `ShortTypeName(Type)` in `McpBridgeService.cs` instead.
+
+### CI/CD
+
+* **CI** (`.github/workflows/ci.yml`): typecheck, tests, build, package check and install check on Ubuntu and Windows for pushes to `main` and every pull request.
+* **Release** (`.github/workflows/release.yml`): push a tag matching `mcp-server/package.json` (for example `v0.3.0`) from `main`. The workflow re-runs the checks, creates a GitHub Release with the npm tarball and `Warudo-MCP.warudo` (if committed), and publishes to npm when the `NPM_TOKEN` repository secret is set.
+* **Dependabot** opens weekly updates for npm and GitHub Actions.
 
 ---
 
