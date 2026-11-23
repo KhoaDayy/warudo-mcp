@@ -82,7 +82,7 @@ Copy and paste this prompt directly into your AI chat (Cursor, Claude, or Cline)
 <!-- x-release-please-start-version -->
 ```text
 Please connect to my Warudo instance via MCP:
-1. Register the "warudo" MCP server in your config using command "npx" with args ["-y", "warudo-mcp-server@0.3.0"].
+1. Register the "warudo" MCP server in your config using command "npx" with args ["-y", "warudo-mcp-server@0.4.0"].
 2. Remind me to subscribe to the "MCP Bridge" plugin on Steam Workshop (https://steamcommunity.com/sharedfiles/filedetails/?id=3809919307) if I haven't already.
 3. Once Warudo is running with a scene open, call warudo_status to verify our live connection.
 ```
@@ -98,7 +98,7 @@ Add the server entry to your MCP client configuration file:
   "mcpServers": {
     "warudo": {
       "command": "npx",
-      "args": ["-y", "warudo-mcp-server@0.3.0"]
+      "args": ["-y", "warudo-mcp-server@0.4.0"]
     }
   }
 }
