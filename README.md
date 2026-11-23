@@ -118,6 +118,7 @@ The server exposes 27 strongly-typed tools categorized into 7 functional domains
 | **Entity** | `warudo_inspect_entity`, `warudo_get_entity_port_value`, `warudo_set_entity_port_value`, `warudo_invoke_entity_trigger`, `warudo_send_plugin_message` | Read/write data ports, fire trigger buttons, and dispatch plugin messages. |
 | **Blueprints** | `warudo_get_selected_graph`, `warudo_list_graphs`, `warudo_list_blueprints`, `warudo_import_graph`, `warudo_export_graph`, `warudo_set_node_data_input` | List graphs compactly (`warudo_list_graphs`: id, name, enabled, node count, filter + pagination) or with full node metadata; serialize and import with `dryRun` validation. |
 | **Graph Editing** | `warudo_manage_graph`, `warudo_manage_node`, `warudo_manage_connection`, `warudo_invoke_flow` | Create/remove/rename graphs, manage nodes, wire pins, and trigger flow inputs. |
+| **Bones & Posing** | `warudo_list_bones`, `warudo_get_bone_offsets`, `warudo_set_bone_offsets`, `warudo_clear_bone_offsets` | Pose a character with per-bone rotation offsets (Warudo 0.15.2+). See [docs/BONES.md](docs/BONES.md). |
 | **Unity Runtime** | `warudo_list_hierarchy`, `warudo_set_gameobject_active`, `warudo_set_material_property` | Traverse GameObject hierarchy, toggle objects, and apply material properties. |
 | **Compatibility** | `warudo_api` | Raw passthrough for native Warudo actions not covered by typed tools. |
 

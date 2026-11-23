@@ -6,6 +6,7 @@ import { registerEntityTools } from "./entities.js";
 import { registerGraphTools } from "./graphs.js";
 import { registerGraphEditTools } from "./graph-edit.js";
 import { registerRuntimeTools } from "./runtime.js";
+import { registerBoneTools } from "./bones.js";
 
 export function registerTools(server: McpServer, deps: Dependencies): void {
   registerStatusTools(server, deps);
@@ -14,5 +15,6 @@ export function registerTools(server: McpServer, deps: Dependencies): void {
   registerGraphTools(server, deps);
   registerRuntimeTools(server, deps);
   registerGraphEditTools(server, deps);
+  registerBoneTools(server, deps);
 
 }
