@@ -8,7 +8,7 @@ import { errorResult, RuntimeError } from "../results.js";
 
 export interface Dependencies {
   api: Pick<WarudoApiClient, "call" | "isConnected" | "getLastFrame" | "getConfirmationPolicy" | "getRecentAutoReplies">;
-  bridge: Pick<WarudoBridge, "call" | "isConnected">;
+  bridge: Pick<WarudoBridge, "call" | "isConnected"> & Partial<Pick<WarudoBridge, "getCapabilities">>;
   config: Config;
   discoverToken?: () => Promise<string | null>;
 }

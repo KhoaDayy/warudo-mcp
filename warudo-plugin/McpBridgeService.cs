@@ -87,7 +87,7 @@ namespace Warudo.Plugins.McpBridge {
                     bridgeVersion = "0.3.0",
                     capabilities = new[] {
                         "list_hierarchy", "set_active", "set_material_property",
-                        "list_blueprints", "list_graphs", "list_assets", "inspect_entity", "set_node_data_input"
+                        "list_blueprints", "list_graphs", "list_assets", "list_assets_page", "inspect_entity", "set_node_data_input"
                     }
                 }, null);
             }
@@ -105,6 +105,8 @@ namespace Warudo.Plugins.McpBridge {
                     return (true, ListGraphs(), null);
                 case "list_assets":
                     return (true, ListAssets(), null);
+                case "list_assets_page":
+                    return (true, ListAssetsPage(data), null);
                 case "inspect_entity":
                     return (true, InspectEntity(data), null);
                 case "set_node_data_input":
@@ -298,8 +300,8 @@ namespace Warudo.Plugins.McpBridge {
 
                     nodes.Add(new {
                         id = node.Id,
-                        typeId = nodeType?.id ?? node.GetType().Name,
-                        title = nodeType?.title ?? node.Name ?? node.GetType().Name,
+                        typeId = nodeType?.id ?? TypeName(node),
+                        title = nodeType?.title ?? node.Name ?? TypeName(node),
                         inputs
                     });
                 }
@@ -329,13 +331,84 @@ namespace Warudo.Plugins.McpBridge {
                     id = asset.IdString,
                     name = asset.Name,
                     active = asset.Active,
-                    typeId = assetType?.id ?? asset.GetType().Name,
-                    title = assetType?.title ?? asset.GetType().Name
+                    typeId = assetType?.id ?? TypeName(asset),
+                    title = assetType?.title ?? TypeName(asset)
                 });
             }
             var result = new List<object>();
             foreach (var g in groups) result.Add(new { category = g.Key, count = g.Value.Count, assets = g.Value });
             return result;
+        }
+
+        /// <summary>
+        /// Filter and paginate on the Unity side so large scenes do not send their
+        /// complete asset inventory across the WebSocket for every MCP search.
+        /// The legacy list_assets action remains unchanged for older clients.
+        /// </summary>
+        private static object ListAssetsPage(JObject data) {
+            RequireOpenScene();
+            var offsetToken = data?["offset"];
+            var limitToken = data?["limit"];
+            if (offsetToken != null && offsetToken.Type != JTokenType.Integer) throw new ArgumentException("offset must be an integer.");
+            if (limitToken != null && limitToken.Type != JTokenType.Integer) throw new ArgumentException("limit must be an integer.");
+            var offset = offsetToken?.Value<int>() ?? 0;
+            var limit = limitToken?.Value<int>() ?? 100;
+            if (offset < 0) throw new ArgumentOutOfRangeException("offset", "offset must not be negative.");
+            if (limit < 1 || limit > 500) throw new ArgumentOutOfRangeException("limit", "limit must be between 1 and 500.");
+
+            var query = ReadOptionalFilter(data, "query");
+            var categoryFilter = ReadOptionalFilter(data, "category");
+            var typeFilter = ReadOptionalFilter(data, "typeId");
+            var matching = new List<(string category, string id, string name, bool active, string typeId, string title)>();
+            var assetCount = 0;
+            foreach (var kv in Warudo.Core.Context.OpenedScene.GetAssets()) {
+                if (++assetCount > MaxAssets) throw new OutputLimitException($"Asset inventory exceeds the {MaxAssets} asset limit.");
+                var asset = kv.Value;
+                var assetType = asset.Type?.AssetType;
+                var category = string.IsNullOrWhiteSpace(assetType?.category) ? "Other" : assetType.category;
+                var typeId = assetType?.id ?? TypeName(asset);
+                var title = assetType?.title ?? TypeName(asset);
+                if (!ContainsIgnoreCase(category, categoryFilter) ||
+                    (typeFilter != null && !string.Equals(typeId, typeFilter, StringComparison.Ordinal)) ||
+                    (query != null && !ContainsIgnoreCase(asset.IdString, query) &&
+                     !ContainsIgnoreCase(asset.Name, query) &&
+                     !ContainsIgnoreCase(typeId, query) && !ContainsIgnoreCase(title, query))) continue;
+                matching.Add((category, asset.IdString, asset.Name, asset.Active, typeId, title));
+            }
+
+            // Stable page ordering, independent of the scene dictionary iteration order.
+            var items = matching.OrderBy(a => a.category, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(a => a.id, StringComparer.OrdinalIgnoreCase)
+                .Skip(offset).Take(limit)
+                .Select(a => (object)new { id = a.id, name = a.name, active = a.active,
+                    typeId = a.typeId, title = a.title, category = a.category }).ToList();
+            var end = (long)offset + limit;
+            return new { total = matching.Count, offset, count = items.Count,
+                nextOffset = end < matching.Count ? (int?)(int)end : null, items };
+        }
+
+        /// <summary>Short runtime type name. Uses Type.FullName because UMod's security verifier
+        /// rejects MemberInfo.get_Name (System.Reflection) in mod assemblies.</summary>
+        private static string TypeName(object value) {
+            return value == null ? "null" : ShortTypeName(value.GetType());
+        }
+
+        private static string ShortTypeName(Type type) {
+            var full = type.FullName ?? type.ToString();
+            var cut = Math.Max(full.LastIndexOf('.'), full.LastIndexOf('+'));
+            return cut >= 0 ? full.Substring(cut + 1) : full;
+        }
+
+        private static string ReadOptionalFilter(JObject data, string field) {
+            var value = data?[field];
+            if (value == null || value.Type == JTokenType.Null) return null;
+            if (value.Type != JTokenType.String) throw new ArgumentException(field + " must be a string.");
+            var filter = value.Value<string>()?.Trim();
+            return string.IsNullOrEmpty(filter) ? null : filter;
+        }
+
+        private static bool ContainsIgnoreCase(string value, string query) {
+            return query == null || (value != null && value.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
         /// <summary>Danh sách graph (blueprint) dạng gọn — không kèm node detail.</summary>
@@ -422,8 +495,8 @@ namespace Warudo.Plugins.McpBridge {
             return new {
                 id = stableId,
                 kind = entity is Warudo.Core.Scenes.Asset ? "asset" : entity is Graph ? "graph" : "node",
-                title = title ?? entity.GetType().Name,
-                typeId = typeId ?? entity.GetType().Name,
+                title = title ?? TypeName(entity),
+                typeId = typeId ?? TypeName(entity),
                 dataInputCount = ports.Count,
                 ports,
                 dataOutputs = outputs,
@@ -456,11 +529,10 @@ namespace Warudo.Plugins.McpBridge {
         private static string TypeLabel(Type t) {
             if (t == null) return "?";
             if (t.IsGenericType) {
-                var def = t.GetGenericTypeDefinition().Name;
-                def = def.Split('`')[0];
+                var def = ShortTypeName(t.GetGenericTypeDefinition()).Split('`')[0];
                 return def + "<" + string.Join(",", t.GetGenericArguments().Select(TypeLabel)) + ">";
             }
-            return t.Name;
+            return ShortTypeName(t);
         }
 
         private static object SetNodeDataInput(JObject data) {
@@ -529,7 +601,7 @@ namespace Warudo.Plugins.McpBridge {
             if (byId != null) return byId;
             var matches = nodes.Where(node => {
                 var nodeType = node.Type?.NodeType;
-                return string.Equals(node.GetType().Name, key, StringComparison.OrdinalIgnoreCase) ||
+                return string.Equals(TypeName(node), key, StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(node.Name, key, StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(nodeType?.title, key, StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(nodeType?.id, key, StringComparison.OrdinalIgnoreCase);

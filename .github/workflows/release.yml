@@ -1,0 +1,49 @@
+name: Release
+# Push a tag like v0.3.1 (must match mcp-server/package.json version).
+# Builds and tests, attaches the npm tarball (and Warudo-MCP.warudo if committed)
+# to a GitHub Release, and publishes to npm when the NPM_TOKEN secret is set.
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+  id-token: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    defaults:
+      run:
+        working-directory: mcp-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: mcp-server/package-lock.json
+      - name: Check tag matches package version
+        run: |
+          v=$(node -p "require('./package.json').version")
+          [ "refs/tags/v$v" = "$GITHUB_REF" ] || { echo "Tag $GITHUB_REF != package version v$v"; exit 1; }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:install
+      - name: Pack
+        run: npm pack --pack-destination "$RUNNER_TEMP/out"
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: .
+        run: |
+          files=("$RUNNER_TEMP"/out/*.tgz)
+          [ -f warudo-plugin/Warudo-MCP.warudo ] && files+=(warudo-plugin/Warudo-MCP.warudo)
+          gh release create "$GITHUB_REF_NAME" "${files[@]}" --generate-notes
+      - name: Publish to npm
+        if: ${{ env.NPM_TOKEN != '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public
