@@ -1,0 +1,69 @@
+name: Release Please
+# Keeps a release PR open on main. Merging it bumps the version, updates the
+# changelog, tags vX.Y.Z, creates the GitHub Release, then publishes below.
+#
+# Setup (once): Settings > Actions > General > "Allow GitHub Actions to create
+# and approve pull requests". Optional secret RELEASE_PLEASE_TOKEN (a PAT) makes
+# CI run on the release PR; without it the PR is created by GITHUB_TOKEN, whose
+# events do not trigger other workflows.
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      released: ${{ steps.rp.outputs.releases_created }}
+      tag: ${{ steps.rp.outputs['mcp-server--tag_name'] }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  publish:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.released == 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    defaults:
+      run:
+        working-directory: mcp-server
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: mcp-server/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:install
+      - name: Attach assets to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          npm pack --pack-destination "$RUNNER_TEMP/out"
+          files=("$RUNNER_TEMP"/out/*.tgz)
+          [ -f ../warudo-plugin/Warudo-MCP.warudo ] && files+=(../warudo-plugin/Warudo-MCP.warudo)
+          gh release upload "${{ needs.release-please.outputs.tag }}" "${files[@]}" --clobber
+      - name: Publish to npm
+        if: ${{ env.NPM_TOKEN != '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public

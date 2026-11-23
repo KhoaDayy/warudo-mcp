@@ -1,0 +1,15 @@
+name: PR title
+# Release Please derives versions from Conventional Commit messages. Squash merges
+# use the PR title, so enforce the format here (feat:, fix:, docs:, ci:, ...).
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+permissions:
+  pull-requests: read
+jobs:
+  semantic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

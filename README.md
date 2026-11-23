@@ -79,17 +79,20 @@ irm https://raw.githubusercontent.com/KhoaDayy/warudo-mcp/main/install.ps1 | iex
 
 #### Option B: AI Agent Self-Setup Prompt
 Copy and paste this prompt directly into your AI chat (Cursor, Claude, or Cline):
+<!-- x-release-please-start-version -->
 ```text
 Please connect to my Warudo instance via MCP:
 1. Register the "warudo" MCP server in your config using command "npx" with args ["-y", "warudo-mcp-server@0.3.0"].
 2. Remind me to subscribe to the "MCP Bridge" plugin on Steam Workshop (https://steamcommunity.com/sharedfiles/filedetails/?id=3809919307) if I haven't already.
 3. Once Warudo is running with a scene open, call warudo_status to verify our live connection.
 ```
+<!-- x-release-please-end -->
 
 #### Option C: Manual Client Configuration
 Add the server entry to your MCP client configuration file:
 
 **Claude Desktop** (`%APPDATA%\Claude\claude_desktop_config.json`) or **Cursor** (`~/.cursor/mcp.json`):
+<!-- x-release-please-start-version -->
 ```json
 {
   "mcpServers": {
@@ -100,6 +103,7 @@ Add the server entry to your MCP client configuration file:
   }
 }
 ```
+<!-- x-release-please-end -->
 
 ---
 
@@ -218,7 +222,9 @@ The `.warudo` mod is packaged by **Warudo Mod Tools** inside a Unity 2021.3 proj
 ### CI/CD
 
 * **CI** (`.github/workflows/ci.yml`): typecheck, tests, build, package check and install check on Ubuntu and Windows for pushes to `main` and every pull request.
-* **Release** (`.github/workflows/release.yml`): push a tag matching `mcp-server/package.json` (for example `v0.3.0`) from `main`. The workflow re-runs the checks, creates a GitHub Release with the npm tarball and `Warudo-MCP.warudo` (if committed), and publishes to npm when the `NPM_TOKEN` repository secret is set.
+* **Release** ([Release Please](https://github.com/googleapis/release-please), `.github/workflows/release-please.yml`): every push to `main` updates a release PR that bumps `mcp-server/package.json`, the `warudo-mcp-server@x.y.z` pins in `install.ps1` and this README, and `CHANGELOG.md`. Merging that PR tags `vX.Y.Z`, creates the GitHub Release, attaches the npm tarball and `Warudo-MCP.warudo` (if committed), and publishes to npm when `NPM_TOKEN` is set.
+* **Commit format.** Versions come from [Conventional Commits](https://www.conventionalcommits.org/): `feat:` bumps minor, `fix:` bumps patch, `feat!:` / `BREAKING CHANGE:` also bumps minor while below 1.0. Squash merges use the PR title, which `pr-title.yml` checks.
+* **Manual fallback** (`.github/workflows/release.yml`): run it against an existing tag to retry a failed publish. It skips creating a release that already exists.
 * **Dependabot** opens weekly updates for npm and GitHub Actions.
 
 ---

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    "mcp-server": {
+      "release-type": "node",
+      "package-name": "warudo-mcp-server",
+      "include-component-in-tag": false,
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": false,
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "/install.ps1"
+        },
+        {
+          "type": "generic",
+          "path": "/README.md"
+        }
+      ]
+    }
+  }
+}
