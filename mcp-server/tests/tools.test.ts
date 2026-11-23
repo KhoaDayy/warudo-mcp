@@ -164,6 +164,52 @@ test("compact graph listing avoids fetching full blueprint nodes", async () => {
   } finally { await session.close(); }
 });
 
+test("capture_viewport returns an inline image and rejects an outdated bridge", async () => {
+  const session = await setup();
+  try {
+    session.bridge.getCapabilities = () => ["list_assets"];
+    const outdated = await session.client.callTool({ name: "warudo_capture_viewport", arguments: {} });
+    assert.equal(outdated.isError, true);
+    assert.match(String((outdated.content as Array<{ text?: string }>)[0].text), /UNSUPPORTED/);
+    assert.deepEqual(session.calls, []);
+
+    session.bridge.getCapabilities = () => ["capture_viewport"];
+    session.bridge.call = async (action, data) => {
+      session.calls.push({ backend: "bridge", action, data });
+      return { action, ok: true, data: { mimeType: "image/jpeg", width: 64, height: 64, byteLength: 3, camera: "Main", base64: "AQID" } };
+    };
+    const response = await session.client.callTool({ name: "warudo_capture_viewport", arguments: { width: 64, height: 64, quality: 50 } });
+    const content = response.content as Array<{ type: string; data?: string; mimeType?: string; text?: string }>;
+    assert.equal(content[0].type, "image");
+    assert.equal(content[0].data, "AQID");
+    assert.equal(content[0].mimeType, "image/jpeg");
+    assert.equal(JSON.parse(content[1].text!).camera, "Main");
+    assert.deepEqual(session.calls, [{ backend: "bridge", action: "capture_viewport", data: { width: 64, height: 64, quality: 50 } }]);
+
+    const tooBig = await session.client.callTool({ name: "warudo_capture_viewport", arguments: { width: 5000 } }).catch((e) => e);
+    assert.ok(tooBig instanceof Error || (tooBig as { isError?: boolean }).isError);
+  } finally { await session.close(); }
+});
+
+test("sync_scene forwards the optional graph and requires bridge support", async () => {
+  const session = await setup();
+  try {
+    session.bridge.getCapabilities = () => ["sync_scene"];
+    session.bridge.call = async (action, data) => {
+      session.calls.push({ backend: "bridge", action, data });
+      return { action, ok: true, data: { synced: true, graph: "Lighting" } };
+    };
+    const withGraph = decode(await session.client.callTool({ name: "warudo_sync_scene", arguments: { graph: "Lighting" } }));
+    assert.deepEqual(withGraph, { synced: true, graph: "Lighting" });
+    await session.client.callTool({ name: "warudo_sync_scene", arguments: {} });
+    assert.deepEqual(session.calls.map((c) => c.data), [{ graph: "Lighting" }, {}]);
+
+    session.bridge.getCapabilities = () => ["list_assets"];
+    const outdated = await session.client.callTool({ name: "warudo_sync_scene", arguments: {} });
+    assert.equal(outdated.isError, true);
+  } finally { await session.close(); }
+});
+
 test("graph listing does not expose a category filter that can never match", async () => {
   const session = await setup();
   try {

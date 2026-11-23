@@ -87,7 +87,8 @@ namespace Warudo.Plugins.McpBridge {
                     bridgeVersion = "0.3.0",
                     capabilities = new[] {
                         "list_hierarchy", "set_active", "set_material_property",
-                        "list_blueprints", "list_graphs", "list_assets", "list_assets_page", "inspect_entity", "set_node_data_input"
+                        "list_blueprints", "list_graphs", "list_assets", "list_assets_page", "inspect_entity", "set_node_data_input",
+                        "capture_viewport", "sync_scene"
                     }
                 }, null);
             }
@@ -111,6 +112,10 @@ namespace Warudo.Plugins.McpBridge {
                     return (true, InspectEntity(data), null);
                 case "set_node_data_input":
                     return (true, SetNodeDataInput(data), null);
+                case "capture_viewport":
+                    return (true, CaptureViewport(data), null);
+                case "sync_scene":
+                    return (true, SyncScene(data), null);
                 default:
                     return (false, null, "Unknown action: " + action);
             }
@@ -397,6 +402,92 @@ namespace Warudo.Plugins.McpBridge {
             var full = type.FullName ?? type.ToString();
             var cut = Math.Max(full.LastIndexOf('.'), full.LastIndexOf('+'));
             return cut >= 0 ? full.Substring(cut + 1) : full;
+        }
+
+        /// <summary>
+        /// Renders the active scene camera into a temporary RenderTexture and returns it as a
+        /// base64 JPEG. Works while the Warudo window is minimized. If the camera already
+        /// renders into a RenderTexture (for example a capture/NDI output) that texture is
+        /// copied instead, so no output pipeline is disturbed.
+        /// </summary>
+        private static object CaptureViewport(JObject data) {
+            var width = ReadBoundedInt(data, "width", 960, 64, 3840);
+            var height = ReadBoundedInt(data, "height", 540, 64, 2160);
+            var quality = ReadBoundedInt(data, "quality", 75, 1, 100);
+
+            var camera = FindCaptureCamera();
+            if (camera == null) throw new InvalidOperationException("No active camera is available to capture.");
+
+            var previousActive = RenderTexture.active;
+            RenderTexture target = null;
+            Texture2D texture = null;
+            try {
+                target = RenderTexture.GetTemporary(width, height, 24, RenderTextureFormat.ARGB32);
+                var existing = camera.targetTexture;
+                if (existing != null) {
+                    Graphics.Blit(existing, target);
+                } else {
+                    camera.targetTexture = target;
+                    try { camera.Render(); } finally { camera.targetTexture = null; }
+                }
+                RenderTexture.active = target;
+                texture = new Texture2D(width, height, TextureFormat.RGB24, false);
+                texture.ReadPixels(new Rect(0, 0, width, height), 0, 0);
+                var bytes = texture.EncodeToJPG(quality);
+                if (bytes == null || bytes.Length == 0) throw new InvalidOperationException("Camera capture produced no image data.");
+                if ((long)bytes.Length * 4 / 3 + 4096 > MaxResponseBytes) {
+                    throw new OutputLimitException("Captured image would exceed the response limit; reduce width, height or quality.");
+                }
+                return new {
+                    mimeType = "image/jpeg", width, height, byteLength = bytes.Length,
+                    camera = camera.name, base64 = Convert.ToBase64String(bytes),
+                };
+            } finally {
+                RenderTexture.active = previousActive;
+                if (target != null) RenderTexture.ReleaseTemporary(target);
+                if (texture != null) UnityEngine.Object.Destroy(texture);
+            }
+        }
+
+        private static Camera FindCaptureCamera() {
+            var main = Camera.main;
+            if (main != null && main.isActiveAndEnabled) return main;
+            Camera best = null;
+            foreach (var camera in Camera.allCameras) {
+                if (camera == null || !camera.isActiveAndEnabled) continue;
+                if (best == null || camera.depth > best.depth) best = camera;
+            }
+            return best;
+        }
+
+        /// <summary>
+        /// Re-broadcasts the opened scene to the editor UI so changes made through the
+        /// bridge appear without closing and reopening the editor. An optional graph is
+        /// validated so a typo is reported instead of silently ignored.
+        /// </summary>
+        private static object SyncScene(JObject data) {
+            string graphName = null;
+            var token = data?["graph"];
+            if (token != null && token.Type != JTokenType.Null) {
+                if (token.Type != JTokenType.String) throw new ArgumentException("graph must be a string.");
+                var key = token.Value<string>()?.Trim();
+                if (!string.IsNullOrEmpty(key)) {
+                    var graph = FindGraph(key);
+                    if (graph == null) throw new ArgumentException("Blueprint was not found: " + key);
+                    graphName = graph.Name;
+                }
+            }
+            Warudo.Core.Context.Service.BroadcastOpenedScene();
+            return new { synced = true, graph = graphName };
+        }
+
+        private static int ReadBoundedInt(JObject data, string field, int fallback, int min, int max) {
+            var token = data?[field];
+            if (token == null || token.Type == JTokenType.Null) return fallback;
+            if (token.Type != JTokenType.Integer) throw new ArgumentException(field + " must be an integer.");
+            var value = token.Value<int>();
+            if (value < min || value > max) throw new ArgumentOutOfRangeException(field, field + " must be between " + min + " and " + max + ".");
+            return value;
         }
 
         private static string ReadOptionalFilter(JObject data, string field) {
