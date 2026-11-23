@@ -372,3 +372,107 @@ test("bone tools resolve a character by name and report ambiguity", async () => 
     assert.equal(ambiguous.isError, true);
   } finally { await session.close(); }
 });
+
+import { mkdtemp, readFile as readFileFs, writeFile as writeFileFs, readdir as readdirFs, rm as rmFs } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
+
+async function withPoseDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(joinPath(tmpdir(), "warudo-poses-"));
+  const previous = process.env.WARUDO_MCP_POSES_DIR;
+  process.env.WARUDO_MCP_POSES_DIR = dir;
+  try { return await run(dir); }
+  finally {
+    if (previous === undefined) delete process.env.WARUDO_MCP_POSES_DIR; else process.env.WARUDO_MCP_POSES_DIR = previous;
+    await rmFs(dir, { recursive: true, force: true });
+  }
+}
+
+test("pose library saves, lists, applies, protects and deletes poses", async () => {
+  await withPoseDir(async (dir) => {
+    const { api, sets } = boneApi();
+    const session = await setup({ api });
+    try {
+      const call = (name: string, args: Record<string, unknown>) => session.client.callTool({ name, arguments: args });
+
+      const empty = await call("warudo_save_pose", { name: "wave", character: CHARACTER });
+      assert.equal(empty.isError, true, "nothing to save yet");
+
+      await call("warudo_set_bone_offsets", { character: CHARACTER, offsets: [{ bone: "RightUpperArm", rotation: [0, 0, 70] }, { bone: "Head", rotation: [0, 0, 12], enabled: false }] });
+      const saved = decode(await call("warudo_save_pose", { name: "Wave", description: "Right hand wave", character: CHARACTER }));
+      assert.equal(saved.saved, "wave");
+      assert.equal(saved.bones, 2);
+
+      const dup = await call("warudo_save_pose", { name: "wave", character: CHARACTER });
+      assert.equal(dup.isError, true);
+      assert.equal(decode(await call("warudo_save_pose", { name: "wave", character: CHARACTER, overwrite: true })).saved, "wave");
+
+      const listed = decode(await call("warudo_list_poses", {}));
+      assert.deepEqual(listed.poses.map((p: { name: string; bones: number }) => [p.name, p.bones]), [["wave", 2]]);
+
+      await call("warudo_clear_bone_offsets", { character: CHARACTER });
+      const applied = decode(await call("warudo_apply_pose", { name: "wave", character: CHARACTER }));
+      assert.deepEqual(applied.offsets.map((o: { bone: string; enabled: boolean }) => [o.bone, o.enabled]), [["RightUpperArm", true], ["Head", false]]);
+      assert.ok(sets.length > 0);
+
+      assert.equal((await call("warudo_apply_pose", { name: "nope", character: CHARACTER })).isError, true);
+      assert.equal(decode(await call("warudo_delete_pose", { name: "wave" })).deleted, "wave");
+      assert.equal((await call("warudo_delete_pose", { name: "wave" })).isError, true);
+      assert.deepEqual(await readdirFs(dir), []);
+    } finally { await session.close(); }
+  });
+});
+
+test("pose names cannot escape the library and corrupt files are reported", async () => {
+  await withPoseDir(async (dir) => {
+    const { api } = boneApi();
+    const session = await setup({ api });
+    try {
+      const call = (name: string, args: Record<string, unknown>) => session.client.callTool({ name, arguments: args });
+      for (const name of ["../evil", "a/b", "..", "con", "", " ", "x".repeat(65), ".hidden"]) {
+        const response = await call("warudo_apply_pose", { name });
+        assert.equal(response.isError, true, JSON.stringify(name));
+        assert.equal((await call("warudo_delete_pose", { name })).isError, true, JSON.stringify(name));
+      }
+      await writeFileFs(joinPath(dir, "broken.json"), "{not json");
+      await writeFileFs(joinPath(dir, "badshape.json"), JSON.stringify({ version: 1, name: "badshape", savedAt: "x", offsets: [{ bone: "Head" }] }));
+      assert.equal((await call("warudo_apply_pose", { name: "broken" })).isError, true);
+      const listed = decode(await call("warudo_list_poses", {}));
+      assert.equal(listed.count, 0);
+      assert.deepEqual(listed.skipped.sort(), ["badshape.json", "broken.json"]);
+      assert.equal(await readFileFs(joinPath(dir, "broken.json"), "utf8"), "{not json");
+    } finally { await session.close(); }
+  });
+});
+
+test("pose_and_capture poses then returns the photo, and needs exactly one pose source", async () => {
+  await withPoseDir(async () => {
+    const { api, sets } = boneApi();
+    const order: string[] = [];
+    const bridge: ServerDependencies["bridge"] & { getCapabilities?: () => string[] } = {
+      call: async (action) => {
+        order.push(action);
+        return { action, ok: true, data: action === "capture_viewport"
+          ? { mimeType: "image/jpeg", width: 640, height: 360, byteLength: 3, camera: "Main", base64: "AQID" } : [] };
+      },
+      isConnected: () => true,
+      getCapabilities: () => ["capture_viewport"],
+    };
+    const session = await setup({ api, bridge });
+    try {
+      const call = (args: Record<string, unknown>) => session.client.callTool({ name: "warudo_pose_and_capture", arguments: args });
+      const shot = await call({ character: CHARACTER, offsets: [{ bone: "Head", rotation: [0, 0, 10] }], settleMs: 0, width: 640, height: 360 });
+      const content = shot.content as Array<{ type: string; data?: string; text?: string }>;
+      assert.equal(content[0].type, "image");
+      assert.equal(content[0].data, "AQID");
+      assert.equal(JSON.parse(content[2].text!).bones, 1);
+      assert.equal(sets.length, 1, "posed before the capture");
+      assert.deepEqual(order, ["capture_viewport"]);
+
+      assert.equal((await call({ character: CHARACTER })).isError, true, "neither pose nor offsets");
+      assert.equal((await call({ character: CHARACTER, pose: "wave", offsets: [{ bone: "Head", rotation: [0, 0, 0] }] })).isError, true, "both");
+      assert.equal((await call({ character: CHARACTER, pose: "missing", settleMs: 0 })).isError, true, "unknown pose");
+      assert.equal(sets.length, 1, "failed requests do not change the pose");
+    } finally { await session.close(); }
+  });
+});

@@ -124,6 +124,48 @@ const rotationSchema = z.tuple([z.number().min(-MAX_ROTATION).max(MAX_ROTATION),
   .describe("Euler rotation offset in degrees [x, y, z], each between -360 and 360.");
 const characterSchema = z.string().min(1).optional().describe("Character asset ID or name. Optional when the scene has exactly one character.");
 
+export const boneEntrySchema = z.object({
+  bone: z.union([z.string().min(1), z.number().int()]).describe("Bone name (for example RightUpperArm or 'right upper arm') or id from warudo_list_bones."),
+  rotation: rotationSchema.optional().describe("Required for a bone that has no entry yet."),
+  enabled: z.boolean().optional(),
+  applyWhileTracked: z.boolean().optional().describe("Keep applying the offset while motion capture is tracking this bone."),
+}).strict();
+
+export type BoneEntry = z.infer<typeof boneEntrySchema>;
+type BoneDeps = Pick<Dependencies, "api" | "bridge">;
+
+export async function readCharacterOffsets({ api, bridge }: BoneDeps, character: string | undefined): Promise<{ character: string; offsets: Offset[] }> {
+  const id = await resolveCharacter(bridge, character);
+  return { character: id, offsets: (await readOffsets(api, id)).offsets };
+}
+
+/** Merge or replace the character's bone offsets and return what Warudo stored. */
+export async function applyBoneOffsets({ api, bridge }: BoneDeps, character: string | undefined, entries: BoneEntry[], mode: "merge" | "replace") {
+  const wanted = new Map<number, BoneEntry>();
+  for (const entry of entries) {
+    const boneId = resolveBone(entry.bone);
+    if (wanted.has(boneId)) throw new InputError(`Bone ${HUMAN_BONES[boneId]} is listed twice.`);
+    wanted.set(boneId, entry);
+  }
+  const id = await resolveCharacter(bridge, character);
+  const current = mode === "merge" ? (await readOffsets(api, id)).offsets : [];
+  const byBone = new Map(current.map((o) => [o.boneId, o]));
+  for (const [boneId, entry] of wanted) {
+    const existing = byBone.get(boneId);
+    if (!existing && !entry.rotation) throw new InputError(`Bone ${HUMAN_BONES[boneId]} has no entry yet; give a rotation.`);
+    const [x, y, z] = entry.rotation ?? [existing!.rotation.x, existing!.rotation.y, existing!.rotation.z];
+    byBone.set(boneId, {
+      bone: HUMAN_BONES[boneId], boneId,
+      enabled: entry.enabled ?? existing?.enabled ?? true,
+      rotation: { x, y, z },
+      applyWhileTracked: entry.applyWhileTracked ?? existing?.applyWhileTracked ?? true,
+    });
+  }
+  await writeOffsets(api, id, [...byBone.values()].map((offset) => toElement(offset, randomUUID())));
+  const stored = (await readOffsets(api, id)).offsets;
+  return { character: id, mode, count: stored.length, offsets: stored };
+}
+
 export function registerBoneTools(server: McpServer, { api, bridge }: Dependencies): void {
   registerTool(server, "warudo_list_bones", "List the humanoid bones that warudo_set_bone_offsets accepts (Unity HumanBodyBones), with ids and body-part groups. Static list; does not contact Warudo.", {
     group: z.enum(["torso", "head", "left arm", "right arm", "left leg", "right leg", "left fingers", "right fingers"]).optional(),
@@ -135,45 +177,15 @@ export function registerBoneTools(server: McpServer, { api, bridge }: Dependenci
   registerTool(server, "warudo_get_bone_offsets", "Read the character's Additional Bone Offsets: per-bone rotation offsets layered on top of the current animation, each with its own enabled toggle. Requires Warudo 0.15.2 or newer.", {
     character: characterSchema,
   }, true, async ({ character }) => {
-    const id = await resolveCharacter(bridge, character);
-    const { offsets } = await readOffsets(api, id);
+    const { character: id, offsets } = await readCharacterOffsets({ api, bridge }, character);
     return result({ character: id, count: offsets.length, offsets });
   });
 
   registerTool(server, "warudo_set_bone_offsets", "Set per-bone rotation offsets on a character to build poses and animation frames. Offsets add to the running animation, so 0,0,0 means no change. Use mode 'merge' (default) to update only the listed bones, or 'replace' to make the list exactly this. At most one entry per bone. Returns the offsets as stored. Reversible with warudo_clear_bone_offsets. Combine with warudo_capture_viewport to check the result.", {
     character: characterSchema,
-    offsets: z.array(z.object({
-      bone: z.union([z.string().min(1), z.number().int()]).describe("Bone name (for example RightUpperArm or 'right upper arm') or id from warudo_list_bones."),
-      rotation: rotationSchema.optional().describe("Required for a bone that has no entry yet."),
-      enabled: z.boolean().optional(),
-      applyWhileTracked: z.boolean().optional().describe("Keep applying the offset while motion capture is tracking this bone."),
-    }).strict()).min(1).max(HUMAN_BONES.length),
+    offsets: z.array(boneEntrySchema).min(1).max(HUMAN_BONES.length),
     mode: z.enum(["merge", "replace"]).default("merge"),
-  }, false, async ({ character, offsets, mode }) => {
-    const wanted = new Map<number, (typeof offsets)[number]>();
-    for (const entry of offsets) {
-      const boneId = resolveBone(entry.bone);
-      if (wanted.has(boneId)) throw new InputError(`Bone ${HUMAN_BONES[boneId]} is listed twice.`);
-      wanted.set(boneId, entry);
-    }
-    const id = await resolveCharacter(bridge, character);
-    const current = mode === "merge" ? (await readOffsets(api, id)).offsets : [];
-    const byBone = new Map(current.map((o) => [o.boneId, o]));
-    for (const [boneId, entry] of wanted) {
-      const existing = byBone.get(boneId);
-      if (!existing && !entry.rotation) throw new InputError(`Bone ${HUMAN_BONES[boneId]} has no entry yet; give a rotation.`);
-      const [x, y, z] = entry.rotation ?? [existing!.rotation.x, existing!.rotation.y, existing!.rotation.z];
-      byBone.set(boneId, {
-        bone: HUMAN_BONES[boneId], boneId,
-        enabled: entry.enabled ?? existing?.enabled ?? true,
-        rotation: { x, y, z },
-        applyWhileTracked: entry.applyWhileTracked ?? existing?.applyWhileTracked ?? true,
-      });
-    }
-    await writeOffsets(api, id, [...byBone.values()].map((offset) => toElement(offset, randomUUID())));
-    const stored = (await readOffsets(api, id)).offsets;
-    return result({ character: id, mode, count: stored.length, offsets: stored });
-  });
+  }, false, async ({ character, offsets, mode }) => result(await applyBoneOffsets({ api, bridge }, character, offsets, mode)));
 
   registerTool(server, "warudo_clear_bone_offsets", "Remove bone offsets from a character, returning those bones to the running animation. Without 'bones' every offset is removed.", {
     character: characterSchema,

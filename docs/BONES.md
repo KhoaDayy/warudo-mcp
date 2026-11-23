@@ -1,4 +1,4 @@
-# Posing characters with bone offsets
+# Posing characters and taking photos
 
 Warudo 0.15.2 added per-entry toggles to a character's **Additional Bone Offsets**. The MCP server exposes them so an AI client can pose a character and build animation frames.
 
@@ -30,6 +30,23 @@ Warudo 0.15.2 added per-entry toggles to a character's **Additional Bone Offsets
 ```
 
 Then call `warudo_capture_viewport` (when available) to look at the result and adjust. Undo with `warudo_clear_bone_offsets`.
+
+## Photo poses
+
+Keep good poses in a small local library and re-apply them whenever you want to shoot.
+
+| Tool | Purpose |
+|---|---|
+| `warudo_pose_and_capture` | Pose and photograph in one call. Give a saved `pose` or inline `offsets`; it waits `settleMs` (default 300 ms) and returns a screenshot from the active camera plus a short summary. Use it to iterate: adjust, shoot, look, repeat. |
+| `warudo_save_pose` | Save the character's current bone offsets under a name (refuses to overwrite unless `overwrite: true`). |
+| `warudo_apply_pose` | Apply a saved pose. `replace` (default) holds exactly that pose; `merge` layers it over the current offsets. |
+| `warudo_list_poses` / `warudo_delete_pose` | Browse and remove saved poses. |
+
+Poses are plain JSON files in `~/.warudo-mcp/poses` (set `WARUDO_MCP_POSES_DIR` to move them), one per pose, using bone names so they stay readable and portable between characters. Names are limited to letters, digits, `-` and `_`. Corrupt files are skipped by `warudo_list_poses` and never overwritten.
+
+Typical session: ask for a pose, let `warudo_pose_and_capture` show it, nudge the offsets until it looks right, then `warudo_save_pose` with a name. Later `warudo_pose_and_capture` with `pose: "<name>"` re-creates it. Screenshots come from the active scene camera, so frame the shot in Warudo first. `warudo_capture_viewport` and `warudo_pose_and_capture` need the updated bridge plugin.
+
+Starting values on the test character: arms raised to the side was `RightUpperArm` `[0, 0, 70]` and `LeftUpperArm` `[0, 0, -70]`; a wave was `RightUpperArm` `[0, 0, 140]` with `RightLowerArm` `[0, 0, -40]`. Axes follow each rig's bone orientation, so check the first photo and adjust.
 
 ## Animation
 

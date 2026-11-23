@@ -8,6 +8,7 @@ import { registerGraphEditTools } from "./graph-edit.js";
 import { registerRuntimeTools } from "./runtime.js";
 import { registerBoneTools } from "./bones.js";
 import { registerVisionTools } from "./vision.js";
+import { registerPoseTools } from "./poses.js";
 
 export function registerTools(server: McpServer, deps: Dependencies): void {
   registerStatusTools(server, deps);
@@ -18,4 +19,5 @@ export function registerTools(server: McpServer, deps: Dependencies): void {
   registerGraphEditTools(server, deps);
   registerBoneTools(server, deps);
   registerVisionTools(server, deps);
+  registerPoseTools(server, deps);
 }

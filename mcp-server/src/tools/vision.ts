@@ -12,23 +12,26 @@ function requireCapability(bridge: Dependencies["bridge"], capability: string): 
   }
 }
 
+export interface CaptureOptions { width: number; height: number; quality: number }
+
+/** Capture the active camera and return MCP content (an inline image plus a small JSON summary). */
+export async function captureViewport(bridge: Dependencies["bridge"], { width, height, quality }: CaptureOptions): Promise<CallToolResult["content"]> {
+  requireCapability(bridge, "capture_viewport");
+  const data = asRecord(await bridgeCall(bridge, "capture_viewport", { width, height, quality }));
+  const { base64, mimeType } = data;
+  if (typeof base64 !== "string" || !base64) throw new RuntimeError("Warudo bridge returned no image data.", "NO_IMAGE_DATA");
+  return [
+    { type: "image" as const, data: base64, mimeType: typeof mimeType === "string" && mimeType.startsWith("image/") ? mimeType : "image/jpeg" },
+    { type: "text" as const, text: JSON.stringify({ width: data.width, height: data.height, byteLength: data.byteLength, camera: data.camera }) },
+  ];
+}
+
 export function registerVisionTools(server: McpServer, { bridge }: Dependencies): void {
   registerTool(server, "warudo_capture_viewport", "Capture a JPEG screenshot from the active Warudo camera and return it as an inline image for visual inspection. Works while the Warudo window is minimized. Use it to verify camera angles, lighting, expressions, outfits and scene composition. Transparent backgrounds render black.", {
     width: z.number().int().min(64).max(3840).default(960).describe("Capture width in pixels (default 960)."),
     height: z.number().int().min(64).max(2160).default(540).describe("Capture height in pixels (default 540)."),
     quality: z.number().int().min(1).max(100).default(75).describe("JPEG quality 1-100 (default 75)."),
-  }, true, async ({ width, height, quality }): Promise<CallToolResult> => {
-    requireCapability(bridge, "capture_viewport");
-    const data = asRecord(await bridgeCall(bridge, "capture_viewport", { width, height, quality }));
-    const { base64, mimeType } = data;
-    if (typeof base64 !== "string" || !base64) throw new RuntimeError("Warudo bridge returned no image data.", "NO_IMAGE_DATA");
-    return {
-      content: [
-        { type: "image" as const, data: base64, mimeType: typeof mimeType === "string" && mimeType.startsWith("image/") ? mimeType : "image/jpeg" },
-        { type: "text" as const, text: JSON.stringify({ width: data.width, height: data.height, byteLength: data.byteLength, camera: data.camera }) },
-      ],
-    };
-  });
+  }, true, async (options): Promise<CallToolResult> => ({ content: await captureViewport(bridge, options) }));
 
   registerTool(server, "warudo_sync_scene", "Ask the Warudo editor UI to refresh the opened scene and blueprints after changes made through MCP, without closing and reopening the editor. An optional graph (ID or name) is validated before the refresh.", {
     graph: z.string().min(1).optional().describe("Optional graph UUID or name to validate before refreshing."),
