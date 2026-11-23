@@ -9,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 
 # Pin the npm package so AI clients never auto-run an unreviewed future release.
 # Bump together with mcp-server/package.json when publishing.
-$McpPackage = 'warudo-mcp-server@0.3.0' # x-release-please-version
+$McpPackage = 'warudo-mcp-server@0.4.0' # x-release-please-version
 
 function Write-Step ($msg) { Write-Host "`n[+] $msg" -ForegroundColor Cyan }
 function Write-Success ($msg) { Write-Host "  [OK] $msg" -ForegroundColor Green }
