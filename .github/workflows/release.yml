@@ -33,7 +33,9 @@ jobs:
       - run: npm test
       - run: npm run test:install
       - name: Pack
-        run: npm pack --pack-destination "$RUNNER_TEMP/out"
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          npm pack --pack-destination "$RUNNER_TEMP/out"
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
