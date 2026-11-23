@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { InputError, result } from "../results.js";
 import { parseValue } from "../values.js";
-import { apiCall, bridgeCall, nonEmpty, registerTool, type Dependencies } from "./shared.js";
+import { apiCall, asRecord, bridgeCall, nonEmpty, page, pageSchema, registerTool, type Dependencies } from "./shared.js";
 
 const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const MAX_BLUEPRINT_BYTES = 900 * 1024;
@@ -11,6 +11,12 @@ const MAX_BLUEPRINT_CONNECTIONS = 50_000;
 
 export function registerGraphTools(server: McpServer, { api, bridge }: Dependencies): void {
   registerTool(server, "warudo_get_selected_graph", "Read the graph currently selected in the Warudo editor.", {}, true, async () => result(await apiCall(api, "getSelectedGraph")));
+  registerTool(server, "warudo_list_graphs", "List blueprint IDs, names, enabled state and node counts without loading all node inputs. Supports filtering and pagination.", {
+    ...pageSchema,
+  }, true, async (filter) => {
+    const graphs = await bridgeCall(bridge, "list_graphs");
+    return result({ source: "bridge", ...page((Array.isArray(graphs) ? graphs : []).map(asRecord), filter) });
+  });
   registerTool(server, "warudo_list_blueprints", "List scene graphs with their IDs and node metadata from the runtime bridge.", {}, true, async () => result(await bridgeCall(bridge, "list_blueprints")));
   registerTool(server, "warudo_set_node_data_input", "Set a blueprint node data input after resolving the graph and node by ID or unique title.", {
     blueprint: nonEmpty, node: nonEmpty, input: nonEmpty, value: z.string(),

@@ -28,6 +28,12 @@ export function registerSceneTools(server: McpServer, { api, bridge }: Dependenc
   registerTool(server, "warudo_list_assets", "List scene assets with stable IDs. Filter by typeId, category or query; use offset/limit for pagination.", {
     ...pageSchema, typeId: z.string().optional(),
   }, true, async (filter) => {
+    if (bridge.getCapabilities?.().includes("list_assets_page")) {
+      const remotePage = asRecord(await bridgeCall(bridge, "list_assets_page", filter));
+      return result({ source: "bridge", ...remotePage });
+    }
+    // Older Bridge versions only expose full grouped inventory. Keep the
+    // original local filtering path until their plugin is upgraded.
     const groups = await bridgeCall(bridge, "list_assets");
     const assets = (Array.isArray(groups) ? groups : []).flatMap((group) => {
       const record = asRecord(group);

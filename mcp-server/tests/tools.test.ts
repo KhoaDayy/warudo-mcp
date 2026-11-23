@@ -106,6 +106,64 @@ test("runtime catalogs return IDs and bounded filtered pages", async () => {
   } finally { await session.close(); }
 });
 
+test("asset discovery delegates filtered pagination to a capable bridge", async () => {
+  const session = await setup();
+  try {
+    const requestedPage = { total: 9, offset: 2, count: 1, nextOffset: 3,
+      items: [{ id: "tree-3", name: "Oak", typeId: "tree", title: "Tree", category: "Environment", active: true }] };
+    session.bridge.getCapabilities = () => ["list_assets_page"];
+    session.bridge.call = async (action, data) => {
+      session.calls.push({ backend: "bridge", action, data });
+      return { action, ok: true, data: requestedPage };
+    };
+    const response = decode(await session.client.callTool({
+      name: "warudo_list_assets",
+      arguments: { query: "oak", category: "environment", typeId: "tree", offset: 2, limit: 1 },
+    }));
+    assert.deepEqual(response, { source: "bridge", ...requestedPage });
+    assert.deepEqual(session.calls, [{ backend: "bridge", action: "list_assets_page",
+      data: { query: "oak", category: "environment", typeId: "tree", offset: 2, limit: 1 } }]);
+  } finally { await session.close(); }
+});
+
+test("asset discovery keeps the legacy path for bridges without server-side pagination", async () => {
+  const session = await setup();
+  try {
+    session.bridge.getCapabilities = () => ["list_assets"];
+    session.bridge.call = async (action, data) => {
+      session.calls.push({ backend: "bridge", action, data });
+      return { action, ok: true, data: [{ category: "Environment", assets: [
+        { id: "a", name: "Oak", typeId: "tree" }, { id: "b", name: "Pine", typeId: "tree" },
+      ] }] };
+    };
+    const response = decode(await session.client.callTool({
+      name: "warudo_list_assets", arguments: { query: "oak", limit: 1 },
+    }));
+    assert.equal(response.total, 1);
+    assert.equal(response.items[0].id, "a");
+    assert.equal(session.calls[0].action, "list_assets");
+  } finally { await session.close(); }
+});
+
+test("compact graph listing avoids fetching full blueprint nodes", async () => {
+  const session = await setup();
+  try {
+    session.bridge.call = async (action, data) => {
+      session.calls.push({ backend: "bridge", action, data });
+      return { action, ok: true, data: [
+        { id: "one", name: "Face Tracking", enabled: true, nodeCount: 200 },
+        { id: "two", name: "Lighting", enabled: true, nodeCount: 8 },
+      ] };
+    };
+    const response = decode(await session.client.callTool({
+      name: "warudo_list_graphs", arguments: { query: "light", limit: 1 },
+    }));
+    assert.equal(response.total, 1);
+    assert.deepEqual(response.items, [{ id: "two", name: "Lighting", enabled: true, nodeCount: 8 }]);
+    assert.deepEqual(session.calls, [{ backend: "bridge", action: "list_graphs", data: {} }]);
+  } finally { await session.close(); }
+});
+
 test("blueprint dry-run accepts exported node dictionaries and validates connections", async () => {
   const session = await setup();
   try {

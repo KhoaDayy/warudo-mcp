@@ -8,7 +8,7 @@ import { discoverApiToken } from "./token.js";
 
 export interface ServerDependencies {
   api: Pick<WarudoApiClient, "call" | "isConnected" | "getLastFrame" | "getConfirmationPolicy" | "getRecentAutoReplies">;
-  bridge: Pick<WarudoBridge, "call" | "isConnected">;
+  bridge: Pick<WarudoBridge, "call" | "isConnected"> & Partial<Pick<WarudoBridge, "getCapabilities">>;
   config: Config;
   discoverToken?: typeof discoverApiToken;
 }
